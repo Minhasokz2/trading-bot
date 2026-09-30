@@ -1,0 +1,36 @@
+# Freqtrade + FreqAI in Docker (official image, free and open source).
+# Two dry-run bots: a rule-based strategy (choose with STRATEGY / TIMEFRAME) and the ML strategy. Neither holds API keys.
+# FreqUI (web dashboard): baseline http://127.0.0.1:8080  ·  ML http://127.0.0.1:8081
+services:
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable_freqai
+    container_name: coinaudit-trend
+    restart: unless-stopped
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/trend.log
+      --db-url sqlite:////freqtrade/user_data/dryrun_trend.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy ${STRATEGY:-CoinAuditTrend}
+      --timeframe ${TIMEFRAME:-4h}
+
+  freqtrade-ai:
+    image: freqtradeorg/freqtrade:stable_freqai
+    container_name: coinaudit-freqai
+    restart: unless-stopped
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    ports:
+      - "127.0.0.1:8081:8080"
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqai.log
+      --db-url sqlite:////freqtrade/user_data/dryrun_freqai.sqlite
+      --config /freqtrade/user_data/config.json
+      --config /freqtrade/user_data/config-freqai.json
+      --strategy CoinAuditFreqAI
+      --freqaimodel LightGBMClassifier

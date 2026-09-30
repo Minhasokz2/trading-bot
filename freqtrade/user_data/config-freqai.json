@@ -1,0 +1,39 @@
+{
+    "freqaimodel": "LightGBMClassifier",
+    "freqai": {
+        "enabled": true,
+        "identifier": "coinaudit-lgbm-v1",
+        "purge_old_models": 2,
+        "train_period_days": 90,
+        "backtest_period_days": 7,
+        "live_retrain_hours": 24,
+        "expiration_hours": 48,
+        "fit_live_predictions_candles": 300,
+        "feature_parameters": {
+            "include_timeframes": ["1h", "4h"],
+            "include_corr_pairlist": ["BTC/USDT", "ETH/USDT"],
+            "label_period_candles": 24,
+            "include_shifted_candles": 2,
+            "indicator_periods_candles": [10, 20],
+            "DI_threshold": 0.9,
+            "weight_factor": 0.9,
+            "principal_component_analysis": false,
+            "use_SVM_to_remove_outliers": false,
+            "plot_feature_importances": 0
+        },
+        "data_split_parameters": {
+            "test_size": 0.25,
+            "shuffle": false
+        },
+        "model_training_parameters": {
+            "n_estimators": 400,
+            "learning_rate": 0.03,
+            "num_leaves": 31,
+            "min_child_samples": 40,
+            "subsample": 0.8,
+            "subsample_freq": 1,
+            "colsample_bytree": 0.8,
+            "verbosity": -1
+        }
+    }
+}

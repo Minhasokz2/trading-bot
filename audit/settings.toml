@@ -1,0 +1,52 @@
+# Coin Audit Bot settings. Every key is optional — missing keys keep the defaults in audit/settings.py.
+# Edit, save, re-run. Values here are the defaults, spelled out so you can see what can be tuned.
+
+[costs]
+fee = 0.001            # Binance spot taker fee per side (0.075% with BNB discount, 0.1% VIP0)
+slippage = 0.0005      # assumed slippage per side in every backtest
+maker_fee = 0.001      # your maker tier (market-making analysis)
+futures_taker = 0.0005 # USD-M futures taker (funding-carry analysis)
+
+[gates]
+min_profit_factor = 1.20   # G2
+min_trades = 20            # G8
+max_p_value = 0.10         # G9 bootstrap
+max_pbo = 0.50             # G10 probability of backtest overfitting (CSCV)
+min_dsr = 0.90             # G11 deflated Sharpe (probability the true Sharpe > 0 after trials)
+candidate_min_gates = 8    # CANDIDATE needs G0 + G1 + G8 and at least this many of the 12 gates
+fdr_alpha = 0.10           # Benjamini-Hochberg false-discovery rate across the library (report only)
+
+[risk]
+accepted = 0.003           # max account risk per trade for ACCEPTED strategies
+candidate = 0.0015         # ... for CANDIDATE strategies
+plan_risk_per_trade = 0.01 # the reference trade plan's sizing
+portfolio_heat = 0.015     # --scan: total open risk cap across all positions
+max_positions = 5          # --scan: maximum simultaneous positions
+max_per_cluster = 2        # --scan: positions per correlation cluster
+cluster_corr = 0.70        # --scan: 90-day return correlation that groups coins into one cluster
+kelly_fraction = 0.5       # fraction of the (conservative) Kelly stake used for the suggestion
+kelly_quantile = 0.20      # bootstrap quantile of Kelly used (0.20 = pessimistic)
+account_usd = 10000.0      # account size used for the slippage-at-your-size check
+
+[verdict]
+favorable = 70
+watchlist = 55
+neutral = 40
+min_volume_usd = 1000000   # below this 24h volume the verdict is forced to AVOID
+
+[market]
+universe_size = 60         # coins in the rebuilt TOTAL/TOTAL2/TOTAL3 indices
+cache_hours = 12
+
+[scan]
+universe = 40              # --scan top N by 24h quote volume
+min_volume_usd = 5000000
+jobs = 1                   # parallel processes for --scan (0 = all cores)
+
+[meta]
+min_events = 150           # historical strategy signals needed before the meta-labeler trains
+conformal_alpha = 0.20     # 80% conformal coverage -> abstain when both outcomes are plausible
+drift_psi_warn = 0.25      # population-stability index above which the meta-labeler is switched off
+
+[notify]
+min_verdict = "FAVORABLE"  # --notify sends when the verdict is at least this (FAVORABLE | WATCHLIST)

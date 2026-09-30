@@ -1,0 +1,9 @@
+# Event calendar used by the market-regime layer. One row per event, UTC times.
+# type: macro (FOMC, CPI, NFP, ETF decision...) | unlock (token unlock) | news (hack, listing, upgrade...)
+# coin: leave empty for market-wide events; put the base symbol (e.g. ARB) for coin-specific ones.
+# Effects: any event within 48h -> -10 on the eligibility score; a macro event within 24h -> "High-volatility
+# event" regime (automatic entries paused); a coin event within 7 days is shown in that coin's report.
+# Fill this from official sources (federalreserve.gov, bls.gov, the project's unlock schedule). Example:
+# 2026-10-28 18:00,FOMC rate decision,macro,
+# 2026-11-15 00:00,ARB team unlock 1.1% supply,unlock,ARB
+date_utc,event,type,coin

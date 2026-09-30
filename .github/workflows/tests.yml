@@ -1,0 +1,27 @@
+name: offline tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Self-test (synthetic data, no network)
+        run: python -m pytest -q --timeout=2400
+      - name: Demo audit (offline)
+        run: python audit/audit.py --demo --no-ml --tf 4h --strategies trend_ema_adx_v1,trend_donchian_v1,range_support_v1
