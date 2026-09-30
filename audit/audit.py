@@ -199,20 +199,27 @@ def meta_check(m: dict) -> dict:
     if not m.get("available"):
         return {"name": name, "score": 50.0, "status": "warn", "weight_mult": 0.0, "metrics": m,
                 "notes": [f"Meta-labeler skipped: {m.get('reason')}."]}
-    notes = [f"Scored {m['events']} past strategy signals. Walk-forward AUC {m['wf_auc']}, "
+    notes = [f"Scored {m['events']} past strategy signals (uniqueness-weighted, mean weight {m.get('uniqueness_mean', 1.0)}, "
+             f"min {m.get('uniqueness_min', 1.0)}). Walk-forward AUC {m['wf_auc']}, "
              f"filtering lifted average trade return by {m['wf_filter_lift_pct']:+.3f} pts; "
              f"holdout AUC {m['holdout_auc']}, lift {m['holdout_filter_lift_pct']:+.3f} pts.",
-             f"Top drivers: {', '.join(m['top_features'])}."]
+             f"Top drivers: {', '.join(m['top_features'])}.",
+             f"Calibration: {'isotonic on out-of-fold predictions' if m.get('calibrated') else 'not enough out-of-fold data'} "
+             f"(Brier {m.get('calibration_brier', 'n/a')}); conformal coverage {1 - m.get('conformal_alpha', 0.2):.0%} "
+             f"(q̂ {m.get('conformal_qhat', 'n/a')}); feature drift PSI {m.get('drift', {}).get('max_psi', 'n/a')} "
+             f"on {m.get('drift', {}).get('feature', 'n/a')}"
+             + (" — **drift warning: model switched off**." if m.get("drift", {}).get("warning") else ".")]
     if m["has_edge"] and m["active_probs"]:
         best = max(m["active_probs"].values())
         s = 50 + (best - m["accept_threshold"]) * 200
-        notes.append("Active signal probabilities: " + ", ".join(f"{k} {v:.0%}" for k, v in m["active_probs"].items())
-                     + f" (accept threshold {m['accept_threshold']:.0%}).")
+        notes.append("Active signals (calibrated P(win) → conformal decision, size multiplier): " + ", ".join(
+            f"{k} {v['p']:.0%} → {v['decision']}, ×{v['size_multiplier']:.2f}" for k, v in (m.get("active") or {}).items()) + ".")
         mult = 1.0
     else:
         s, mult = 50, 0.0
         notes.append("No proven filtering edge (or no active signals) — excluded from the verdict; "
-                     "signals fall back to their walk-forward win rates.")
+                     "signals fall back to their walk-forward win rates."
+                     + (f" Reason: {m['edge_reason']}." if m.get("edge_reason") else ""))
     s = float(np.clip(s, 0, 100))
     return {"name": name, "score": round(s, 1), "status": "pass" if s >= 65 else "warn" if s >= 40 else "fail",
             "notes": notes, "metrics": m, "weight_mult": mult}
@@ -757,6 +764,10 @@ def save(a: dict, tearsheet: bool = True) -> Path:
     LOG.parent.mkdir(exist_ok=True)
     stamp = a["audit_time_utc"].replace(" ", "_").replace(":", "")
     base = REPORTS / f"{a['symbol']}_{a['timeframe']}_{stamp}"
+    k = 2
+    while Path(str(base) + ".md").exists():                      # same minute twice (watch mode / replays)
+        base = REPORTS / f"{a['symbol']}_{a['timeframe']}_{stamp}_r{k}"
+        k += 1
     qret, bench, title = a.pop("_qs")
     ts = analytics.tearsheet(qret, bench, Path(str(base) + "_tearsheet.html"),
                              f"{a['symbol']} {a['timeframe']} — {title} vs buy & hold") if tearsheet else None

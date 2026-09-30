@@ -2,7 +2,6 @@
 volume must be rejected. Bearish shapes are research events that block longs."""
 import itertools
 
-import numpy as np
 import pytest
 
 import indicators as ind

@@ -21,4 +21,4 @@ exclude = ["freqtrade/user_data/strategies", ".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]
-ignore = ["E501", "B905", "E741", "B023"]
+ignore = ["E501", "B905", "E741", "B023", "E701", "E702", "E731", "B008", "B007"]

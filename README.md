@@ -60,7 +60,7 @@ self-test and `--offline` work without any network.
 | `AUDIT.bat SOL --tf all` | Every timeframe, tells you which one (if any) has strategies that survive validation |
 | `AUDIT.bat SOL ARB INJ` | Several coins + a ranking |
 | `AUDIT.bat SOL --strategies trend,dip` | Restrict the library (ids, families or name fragments) — faster |
-| `AUDIT.bat SOL --no-market` / `--no-ml` / `--no-futures` | Skip the crypto-wide + macro layer / the meta-labeler / futures data |
+| `AUDIT.bat SOL --no-market` / `--no-ml` / `--no-futures` / `--no-tearsheet` | Skip the crypto-wide + macro layer / the meta-labeler / futures data / the HTML tearsheet |
 | `AUDIT.bat SOL --watch` | Also add SOL/USDT to the Freqtrade dry-run whitelist |
 | `AUDIT.bat SOL --offline research/data/clean` | Audit from local parquet files (downloaded with `RESEARCH_DOWNLOAD.bat`) |
 | `AUDIT.bat SOL --notify` | Push the summary when the verdict is FAVORABLE (`DISCORD_WEBHOOK_URL` or `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) |

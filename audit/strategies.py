@@ -400,19 +400,23 @@ class DeepDrawdownReclaim(Strategy):
 # Chart-pattern & price-action modules (see patterns.py). Each is its own strategy with its
 # own parameters and validation — they are never blended into one blind score.
 # =============================================================================
-import patterns as pt
+import patterns as pt  # noqa: E402  (after the base classes on purpose)
 
 _CACHE: dict = {}
 
 
 def _pat(df, key, fn):
-    """Cache pivots/formations per dataframe (formations don't depend on entry parameters)."""
-    k = (id(df), len(df), df.index[-1], key)
-    if k not in _CACHE:
-        if len(_CACHE) > 400:
-            _CACHE.clear()
-        _CACHE[k] = fn()
-    return _CACHE[k]
+    """Cache pivots/formations per dataframe (formations don't depend on entry parameters).
+    The entry keeps a reference to the frame and checks identity, so a recycled object id can never
+    return another coin's formations (v6 fix)."""
+    k = (id(df), len(df), key)
+    hit = _CACHE.get(k)
+    if hit is not None and hit[0] is df:
+        return hit[1]
+    if len(_CACHE) > 400:
+        _CACHE.clear()
+    _CACHE[k] = (df, fn())
+    return _CACHE[k][1]
 
 
 def _piv(df):
@@ -601,7 +605,7 @@ class CandleAtLevel(Strategy):
         bull = np.zeros(len(df), bool)
         for k in pt.BULL_CANDLES:
             bull |= cd[k]
-        L, a, c = df["low"].values, df["atr"].values, df["close"].values
+        L, a = df["low"].values, df["atr"].values
         bb = ta.bbands(df["close"], length=20, std=2).iloc[:, 0].values
         n = len(df)
         at_level = np.zeros(n, bool)

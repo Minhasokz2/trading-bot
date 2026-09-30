@@ -6,14 +6,21 @@ import overfit
 
 
 def test_pbo_high_for_noise_low_for_real_edge():
-    rng = np.random.default_rng(0)
-    noise = rng.normal(0, 0.01, size=(2000, 12))
-    r = overfit.cscv_pbo(noise)
-    assert r["combos"] == 70 and 0.3 <= r["pbo"] <= 0.8      # no real edge: the IS winner is random OOS
-    edge = noise.copy()
-    edge[:, 3] += 0.004                                     # one parameter set has a genuine edge
-    r2 = overfit.cscv_pbo(edge)
-    assert r2["pbo"] <= 0.1 and r2["p_loss_oos"] <= 0.1
+    pbos, edge_pbos = [], []
+    for seed in range(12):
+        rng = np.random.default_rng(seed)
+        noise = rng.normal(0, 0.01, size=(2000, 12))
+        r = overfit.cscv_pbo(noise)
+        assert r["combos"] == 70 and r["trials"] == 12
+        pbos.append(r["pbo"])
+        edge = noise.copy()
+        edge[:, 3] += 0.004                                 # one parameter set has a genuine edge
+        r2 = overfit.cscv_pbo(edge)
+        edge_pbos.append(r2["pbo"])
+        assert r2["p_loss_oos"] <= 0.1
+    # no real edge: the in-sample winner lands below the OOS median about half the time (one draw is noisy)
+    assert 0.3 <= np.mean(pbos) <= 0.7 and max(edge_pbos) <= 0.15 and np.mean(edge_pbos) < np.mean(pbos)
+    noise = np.random.default_rng(0).normal(0, 0.01, size=(2000, 12))
     assert overfit.cscv_pbo(noise[:, :1])["pbo"] == 0.0     # a single trial cannot be selection-biased
     assert overfit.cscv_pbo(noise[:30]) is None             # too short to split
 
@@ -42,6 +49,7 @@ def test_probabilistic_sharpe_monotone():
 
 def test_benjamini_hochberg_known_values():
     q = overfit.benjamini_hochberg([0.01, 0.04, 0.03, 0.2])
-    assert q.tolist() == pytest.approx([0.04, 0.04, 0.04, 0.2])
+    # ranks: 0.01 -> 0.04, 0.03 -> 0.06, 0.04 -> 0.0533, 0.2 -> 0.2; then monotone from the top
+    assert q.tolist() == pytest.approx([0.04, 0.04 * 4 / 3, 0.04 * 4 / 3, 0.2])
     assert overfit.benjamini_hochberg([]).size == 0
     assert overfit.benjamini_hochberg([0.5]).tolist() == [0.5]

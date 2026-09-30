@@ -17,7 +17,6 @@ import itertools
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
 import vectorbt as vbt

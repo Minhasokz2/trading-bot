@@ -43,6 +43,13 @@ Everything below runs offline on synthetic data in the test-suite; live endpoint
   hit rate is significantly below its backtest gets its new signals BLOCKED (feedback loop).
 - `research/verdict_backtest.py`: replays the whole audit at many past dates and grades the verdicts.
 
+### Bugs fixed on the way
+- Formation / indicator caches were keyed by `id(df)`; Python recycles object ids, so auditing several coins in one
+  process (or the test-suite) could serve another frame's formations. Entries now keep a reference and check identity.
+- Every offline frame carried a `DataFrame.attrs` list that pandas 3 deep-copied on each operation (a 12-minute demo
+  audit became 2 minutes once removed); the data layer now strips `attrs` from anything it loads.
+- `review()` grading and the signal log migrate older CSV headers instead of misaligning columns.
+
 ### Engineering
 - `tests/` (pytest, offline): backtester mechanics, 15 planted patterns × volume/no-volume, candlesticks,
   lookahead self-test for all 27 strategies + a deliberately leaking strategy, gates, overfitting statistics,

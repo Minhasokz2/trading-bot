@@ -237,12 +237,14 @@ def prepared(strategy, df: pd.DataFrame, ctx: dict, cut: int) -> pd.DataFrame:
     """Indicator frame recomputed from raw candles cut at `cut`, shared by every strategy that uses the
     default prepare() (the indicator pass is the slow part of the lookahead test)."""
     own = type(strategy).prepare is not Strategy_prepare
-    key = (id(df), len(df), df.index[-1], cut, type(strategy).__name__ if own else "default")
-    if key not in _PREP_CACHE:
-        if len(_PREP_CACHE) > 64:
-            _PREP_CACHE.clear()
-        _PREP_CACHE[key] = strategy.prepare(df.iloc[:cut].copy(), ctx)
-    return _PREP_CACHE[key]
+    key = (id(df), len(df), cut, type(strategy).__name__ if own else "default")
+    hit = _PREP_CACHE.get(key)
+    if hit is not None and hit[0] is df:                     # identity check: object ids get recycled
+        return hit[1]
+    if len(_PREP_CACHE) > 64:
+        _PREP_CACHE.clear()
+    _PREP_CACHE[key] = (df, strategy.prepare(df.iloc[:cut].copy(), ctx))
+    return _PREP_CACHE[key][1]
 
 
 def lookahead_test(strategy, df: pd.DataFrame, ctx: dict, params: dict, cuts=None) -> bool:

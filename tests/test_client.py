@@ -21,7 +21,7 @@ def test_all_timeframes_are_resampled_and_aligned(universe_dir):
     assert int(row["close_time"]) - int(row["open_time"]) == 86_400_000 - 1
     w = c.klines("DEMOUSDT", "1w", 5)
     assert all(t.day_name() == "Monday" for t in w.index)
-    assert d1["open_time"].iloc[-1] == d1.index[-1].as_unit("ms").asi8    # epoch ms, whatever the resolution
+    assert d1["open_time"].iloc[-1] == d1.index[-1].value // 1_000_000     # epoch ms, whatever the resolution
 
 
 def test_as_of_hides_the_future_and_rebuilds_ticker(universe_dir):

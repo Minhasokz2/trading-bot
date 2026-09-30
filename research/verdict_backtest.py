@@ -21,7 +21,6 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
@@ -29,7 +28,6 @@ sys.path.insert(0, str(ROOT.parent / "audit"))
 warnings.filterwarnings("ignore")
 
 import audit as au  # noqa: E402
-import regime as rg  # noqa: E402
 from binance_client import BinanceClient, BinanceError, FuturesClient, OfflineClient, OfflineFuturesClient  # noqa: E402
 
 RESULTS = ROOT / "results"
@@ -93,6 +91,9 @@ def replay_one(args_d: dict) -> dict:
 
 def summarize(df: pd.DataFrame) -> str:
     L = []
+    df = df.copy()
+    if "approved" in df:
+        df["approved"] = df["approved"].fillna("").astype(str)
     g = df[df["outcome"].isin(["target1", "stop", "timeout"])]
     if g.empty:
         return "No graded verdicts yet."
