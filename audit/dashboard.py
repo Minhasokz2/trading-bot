@@ -103,10 +103,21 @@ def _tile(label: str, value, delta: str = "") -> str:
 
 
 def build(reports_dir: Path, audits_csv: Path, signals_csv: Path | None = None, out: Path | None = None) -> Path:
+    """Write the stand-alone dashboard.html (links are relative: it lives next to the reports)."""
     reports_dir = Path(reports_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
     out = out or reports_dir / "dashboard.html"
-    latest = _latest_reports(reports_dir)
+    doc = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+           f'<title>Coin audit dashboard</title><style>{CSS}</style></head><body>{body(reports_dir, audits_csv, signals_csv)}</body></html>')
+    out.write_text(doc, encoding="utf-8")
+    return out
+
+
+def body(reports_dir: Path, audits_csv: Path, signals_csv: Path | None = None, link_prefix: str = "") -> str:
+    """The dashboard's HTML body: tiles, one row per coin/timeframe, the scans. `link_prefix` turns the relative
+    report links into web-app links (/reports/)."""
+    reports_dir = Path(reports_dir)
+    latest = _latest_reports(reports_dir) if reports_dir.exists() else []
     hist = _history(Path(audits_csv))
     graded = [h for rows in hist.values() for h in rows if h[2]]
     wins = sum(1 for h in graded if h[3] not in ("",) and float(h[3]) > 0)
@@ -128,8 +139,10 @@ def build(reports_dir: Path, audits_csv: Path, signals_csv: Path | None = None, 
         scores = [h[1] for h in sorted(hist.get((a["symbol"], a["timeframe"]), []))]
         flags = "; ".join(f[:60] for f in a.get("flags", [])[:2])
         alt_txt = f" · alt {float(mr.get('alt_score') or 0):.0f}" if mr else ""
+        chart_link = (f' <a class="flag" href="{html.escape(link_prefix + a["chart_file"])}" title="interactive chart">chart</a>'
+                      if a.get("chart_file") else "")
         rows.append(
-            f'<tr><td><a href="{html.escape(a["_md"])}">{html.escape(a["symbol"])}</a> <span class="flag">{a["timeframe"]}</span></td>'
+            f'<tr><td><a href="{html.escape(link_prefix + a["_md"])}">{html.escape(a["symbol"])}</a> <span class="flag">{a["timeframe"]}</span>{chart_link}</td>'
             f'<td>{html.escape(a.get("audit_time_utc", ""))}</td>'
             f'<td><span class="v {cls}"><span class="dot"></span>{icon} {html.escape(a.get("verdict", ""))}</span></td>'
             f'<td class="num"><span class="meter" title="score {a.get("score", 0)}/100"><i style="width:{max(0, min(100, a.get("score", 0)))}%"></i></span>{a.get("score", 0):.0f}</td>'
@@ -146,14 +159,9 @@ def build(reports_dir: Path, audits_csv: Path, signals_csv: Path | None = None, 
     scan_html = ""
     if scans:
         scan_html = "<h2>Market scans</h2><ul>" + "".join(
-            f'<li><a href="{html.escape(s.name)}">{html.escape(s.stem)}</a></li>' for s in scans[-5:][::-1]) + "</ul>"
-    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coin audit dashboard</title><style>{CSS}</style></head><body>
-<h1>Coin audit dashboard</h1><p class="sub">Latest audit per coin · rebuilt {now} UTC · read-only research, not financial advice</p>
+            f'<li><a href="{html.escape(link_prefix + s.name)}">{html.escape(s.stem)}</a></li>' for s in scans[-5:][::-1]) + "</ul>"
+    return f"""<h1>Coin audit dashboard</h1><p class="sub">Latest audit per coin · {now} UTC · read-only research, not financial advice</p>
 <div class="tiles">{''.join(tiles)}</div>
 <h2>Latest audits</h2>{table if rows else '<p class="sub">No reports yet — run an audit first.</p>'}
 {scan_html}
-<p class="foot">Verdict thresholds: FAVORABLE ≥ 70 · WATCHLIST 55–70 · NEUTRAL 40–55 · AVOID &lt; 40. Score meter = audit score / 100. Sparkline = the last 12 audit scores of that coin.</p>
-</body></html>"""
-    out.write_text(doc, encoding="utf-8")
-    return out
+<p class="foot">Verdict thresholds: FAVORABLE ≥ 70 · WATCHLIST 55–70 · NEUTRAL 40–55 · AVOID &lt; 40. Score meter = audit score / 100. Sparkline = the last 12 audit scores of that coin.</p>"""

@@ -1,6 +1,6 @@
 [project]
 name = "coin-audit-bot"
-version = "6.1.1"
+version = "6.2.0"
 description = "Read-only Binance Spot coin-audit research bot: validated strategy library, chart patterns, market regime, ML meta-labeler."
 requires-python = ">=3.11,<3.15"
 readme = "README.md"

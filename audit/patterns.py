@@ -687,7 +687,8 @@ def scan(df: pd.DataFrame, cost: float) -> dict:
             lvl_now = _level_at(s, n - 1)
             if np.all(seg > s["stop"]) and np.all(seg <= [_level_at(s, t) for t in range(s["valid_from"], n)]):
                 pending.append({"pattern": s["name"], "trigger_close_above": round(float(lvl_now), 8),
-                                "invalidation": round(s["stop"], 8), "expires_in_bars": s["expiry"] - (n - 1)})
+                                "invalidation": round(s["stop"], 8), "expires_in_bars": s["expiry"] - (n - 1),
+                                "start": int(s["start"])})
     cd = candles(df)
     recent = []
     for back in range(3):

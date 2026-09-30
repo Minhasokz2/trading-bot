@@ -96,7 +96,9 @@ More tuning (fees, gates, risk caps, verdict thresholds): copy `audit/settings.t
   in constant time; 8 wrong passwords from one address lock it out for 10 minutes. The throttle is best effort (it keys on
   Render's `True-Client-IP`); the real protection is the long random password Render generates.
 * Every POST must come from this site's own pages (checked with the browser's `Sec-Fetch-Site` header, with `Origin` as the fallback), because browsers attach Basic credentials to cross-site form posts.
-* Reports are rendered with a strict Content-Security-Policy (no inline scripts); the HTML tearsheet runs sandboxed.
+* Pages carry a strict Content-Security-Policy: scripts only from `/static/` plus one hashed theme snippet, no inline
+  handlers. Raw HTML inside a report is shown as text. Stored chart pages are re-rendered from the report's JSON with the
+  current renderer; the HTML tearsheet runs sandboxed.
 * File access is by exact report name only; `..`, slashes and hidden files are refused.
 * There are **no exchange API keys anywhere**, and nothing in this project can place an order.
 * The container runs as an unprivileged user. It starts as root only long enough to fix the disk's ownership, then drops privileges.
@@ -107,6 +109,9 @@ More tuning (fees, gates, risk caps, verdict thresholds): copy `audit/settings.t
 * **Deploys take a few seconds of downtime**: a service with a disk stops the old instance before starting the new one
   ([Render disks](https://render.com/docs/disks)). A job in flight is marked *interrupted*; jobs still waiting resume.
 * **One instance only.** A disk cannot be shared or scaled out, which is fine for this workload.
+* **Reading a result.** A finished job links to its report page: a summary card (verdict, plan, signals, a re-run button),
+  the chart with the plan drawn on the candles, then the full report. *Reports* lists every audit with verdict and score;
+  *Dashboard* shows the latest audit per coin.
 * **Backups.** Render snapshots the disk every 24 hours and keeps them for at least 7 days (full-disk restore only).
 * **Memory kills.** If a job ends as *failed — killed, most likely out of memory*, use the next plan up or narrow the job
   with the *Only these strategies* box.

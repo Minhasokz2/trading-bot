@@ -1,5 +1,31 @@
 # Changelog
 
+## v6.2 — 2026-09-30 — the chart, and a web app you would actually use
+
+- **Every audit now draws its opportunity on the coin's chart.** `audit/chart.py` + `audit/static/chart.js`: an
+  interactive candlestick chart (the last 500 candles of the audited timeframe, volume, EMA 20/50/200, confirmed
+  swing pivots) with the trade plan on it — entry zone, stop and targets as dashed levels and as reward / risk
+  boxes right of the last candle, forming patterns with their trigger and invalidation levels, completed bearish
+  patterns, candlestick names and the strategy signal marker — and an opportunity panel: verdict, score, plan
+  with distances and R multiples, signals (approved or why blocked), patterns, regime. Scroll to zoom, drag to
+  pan, hover for OHLCV. No dependency and no CDN: a canvas renderer of our own, so it works from a `file://`
+  report and under the web app's strict CSP. Written as `<report>_chart.html` next to every report (linked from
+  the markdown, the dashboard and the CLI output) and embedded in the report page of the web app; the chart data
+  is in the report JSON (`chart`).
+- **Web app redesigned** (`audit/webapp.py`, `audit/static/app.js`): an app shell with navigation and a light /
+  dark switch; a home page with the audit form up front, the latest audit per coin as cards (verdict, score,
+  plan, links to report and chart), status tiles, schedule and jobs; a reports page that lists audits with
+  verdict, score and approved signals (from `audits.csv`, no JSON is opened), a filter box and links to chart /
+  JSON / tearsheet; a report page with a summary card (verdict, plan, signals, re-run button), the chart, then
+  the report; a live job page with the pipeline stage, elapsed time, error and report / chart buttons; the
+  dashboard inside the app; relative times everywhere.
+- Security kept: no inline script except one hashed theme snippet; raw HTML in a report is rendered as text;
+  stored chart pages are re-rendered from the report JSON with the current renderer (or, without JSON, served
+  with a policy that allows exactly the script they carry).
+- `patterns.scan` reports the start index of a forming pattern (drawn as the level's start on the chart).
+- Tests: `tests/test_chart.py` (chart data, page, CSP hash, and — when Node + Playwright + Chromium are
+  present — the chart drawn in a real browser with the plan, patterns and signals in the panel).
+
 ## v6.1.1 — 2026-09-30 — first live audit crashed
 
 - **Fix: every first audit of a coin on a fresh install died in the regime step** with

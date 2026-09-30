@@ -35,6 +35,7 @@ import pandas as pd
 
 import analyses
 import analytics
+import chart
 import dashboard
 import market as mk
 import notify
@@ -469,17 +470,19 @@ def audit(client, fut, coin: str, quote: str, tf: str, use_ml: bool, use_market:
     qret = pd.Series(best[1].trades_dev.bar_ret, index=df.index)
     qm = analytics.metrics(qret, bench)
 
-    return {"symbol": symbol, "base": base, "quote": quote, "timeframe": tf,
-            "audit_time_utc": now.strftime("%Y-%m-%d %H:%M"),
-            "point_in_time": bool(getattr(client, "as_of_ms", None)), "offline": isinstance(client, OfflineClient),
-            "data_until_utc": df.index[-1].strftime("%Y-%m-%d %H:%M"), "candles": len(df),
-            "history_days": int((d1.index[-1] - d1.index[0]).days),
-            "score": score, "verdict": v, "verdict_text": VERDICT_TEXT[v], "flags": flags, "regime": reg,
-            "plan": plan, "checks": results, "strategies": rows, "signals": signals, "research": research,
-            "meta": meta, "best_strategy": best[0].id, "best_quantstats": qm, "patterns": scan,
-            "market": {k: v for k, v in m.items() if k not in ("series_1d", "series_4h", "pairs")},
-            "market_regime": mreg, "track_record": {k: v for k, v in track.items() if k in {r["id"] for r in rows}},
-            "_qs": (qret, bench, best[0].name)}
+    out = {"symbol": symbol, "base": base, "quote": quote, "timeframe": tf,
+           "audit_time_utc": now.strftime("%Y-%m-%d %H:%M"),
+           "point_in_time": bool(getattr(client, "as_of_ms", None)), "offline": isinstance(client, OfflineClient),
+           "data_until_utc": df.index[-1].strftime("%Y-%m-%d %H:%M"), "candles": len(df),
+           "history_days": int((d1.index[-1] - d1.index[0]).days),
+           "score": score, "verdict": v, "verdict_text": VERDICT_TEXT[v], "flags": flags, "regime": reg,
+           "plan": plan, "checks": results, "strategies": rows, "signals": signals, "research": research,
+           "meta": meta, "best_strategy": best[0].id, "best_quantstats": qm, "patterns": scan,
+           "market": {k: v for k, v in m.items() if k not in ("series_1d", "series_4h", "pairs")},
+           "market_regime": mreg, "track_record": {k: v for k, v in track.items() if k in {r["id"] for r in rows}},
+           "_qs": (qret, bench, best[0].name)}
+    out["chart"] = chart.build(out, df, tick=tick)                 # the candles with the plan drawn on them
+    return out
 
 
 # ------------------------------------------------------------------- output
@@ -626,6 +629,8 @@ def to_markdown(a: dict) -> str:
     L = [f"# Coin audit: {a['symbol']} · {a['timeframe']}", "",
          f"**Verdict: {a['verdict']} — {a['score']}/100**", "", a["verdict_text"], ""]
     L += [f"> ⚠ {f}" for f in a["flags"]] + ([""] if a["flags"] else [])
+    if a.get("chart_file"):
+        L += [f"📈 **Interactive chart with the plan drawn on the candles:** [{a['chart_file']}]({a['chart_file']})", ""]
     L += [f"Audited {a['audit_time_utc']} UTC · {a['candles']} {a['timeframe']} candles to {a['data_until_utc']} UTC · "
           f"{a['history_days']} days listed", "",
           "## Regime", "",
@@ -774,6 +779,9 @@ def save(a: dict, tearsheet: bool = True) -> Path:
     if ts:
         a["tearsheet"] = ts.name
     a["report_path"] = Path(str(base) + ".md").name
+    if a.get("chart"):
+        a["chart_file"] = Path(str(base) + "_chart.html").name
+        Path(str(base) + "_chart.html").write_text(chart.standalone_html(a), encoding="utf-8")
     Path(str(base) + ".md").write_text(to_markdown(a), encoding="utf-8")
     Path(str(base) + ".json").write_text(json.dumps(a, indent=2, default=_json), encoding="utf-8")
     p = a["plan"]
@@ -1049,6 +1057,8 @@ def run_audits(client, fut, args, tfs, now, strategies, use_market) -> Ranking:
             path = save(a, tearsheet=not args.no_tearsheet and not args.loop)
             print_summary(a)
             print(f"  Report: {path}")
+            if a.get("chart_file"):
+                print(f"  Chart:  {path.with_name(a['chart_file'])}")
             if args.notify and notify.should_notify(a["verdict"]):
                 sent = notify.send(notify.signal_message(a))
                 print(f"  Notified: {', '.join(sent) or 'nobody'}")

@@ -217,7 +217,8 @@ def test_report_viewer_and_path_safety(web, tmp_path):
     (tmp_path / "reports" / "SOLUSDT_4h_2026-01-01_0000_tearsheet.html").write_text("<html>tearsheet</html>")
     (tmp_path / "secret.txt").write_text("top secret")
     r = web.get("/reports/SOLUSDT_4h_2026-01-01_0000.md")
-    assert r.status_code == 200 and "<h1>Coin audit</h1>" in r.text and "<table>" in r.text and 'class="wrap"' in r.text
+    assert r.status_code == 200 and "<h1>Coin audit</h1>" in r.text and "<table>" in r.text and 'class="wrap' in r.text
+    assert "&lt;script" in r.text and "<script>alert" not in r.text                        # raw HTML in a report is text, not markup
     assert "script-src 'self'" in r.headers["content-security-policy"]                    # injected script cannot run
     assert web.get("/reports/SOLUSDT_4h_2026-01-01_0000.md?raw=1").text.startswith("# Coin audit")
     j = web.get("/reports/SOLUSDT_4h_2026-01-01_0000.json")
@@ -232,7 +233,7 @@ def test_report_viewer_and_path_safety(web, tmp_path):
 
 def test_dashboard_page_and_rebuild(web):
     r = web.get("/dashboard")
-    assert r.status_code == 200 and "Coin audit dashboard" in r.text and "Coin Audit home" in r.text
+    assert r.status_code == 200 and "Coin audit dashboard" in r.text and 'href="/dashboard" aria-current="page"' in r.text
     assert web.post("/dashboard/rebuild", follow_redirects=False).headers["location"] == "/dashboard"
 
 

@@ -1,4 +1,4 @@
-# Coin Audit Bot v6.1 — Binance Spot strategy research bot
+# Coin Audit Bot v6.2 — Binance Spot strategy research bot
 
 Everything here is free and open source. No API keys, no real orders: the audit is **read-only** and both
 Freqtrade bots run in **dry-run** (paper trading). Research tool, not financial advice.
@@ -22,7 +22,8 @@ much more hostile validation (12 gates, overfitting statistics, live-vs-backtest
 | `RESEARCH_VERDICT_BACKTEST.bat SOL` · `./linux/research_verdict_backtest.sh SOL` · `mac/11` | Replays the whole audit every 7 days over 6 months and grades the verdicts it gave ("audit the auditor"). |
 | `AUDIT.bat --review` | Grades past audits **and every logged signal**; builds the live track record that later audits use. |
 
-| `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The same audits in a password-protected web page on your own machine (`http://127.0.0.1:10000`). This is what gets hosted online. |
+| `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The same audits in a password-protected web page on your own machine (`http://127.0.0.1:10000`): audit form, live job log, reports with the chart, dashboard. This is what gets hosted online. |
+| every audit → `audit/reports/<SYMBOL>_<tf>_<time>_chart.html` | **The chart (v6.2):** the candles the audit looked at with the opportunity drawn on them — entry zone, stop, targets as levels and reward/risk boxes, forming patterns with trigger and invalidation, signal markers, EMAs, pivots — plus the verdict, plan and signals next to it. Opens in any browser, no internet needed. |
 | `docker/smoke_test.sh URL PASSWORD` | Checks a running web app (local, Docker or hosted): login wall, data-source reachability, a full demo audit. |
 
 **Host it online:** see [DEPLOY.md](DEPLOY.md) — a Render Blueprint (`render.yaml`) + `Dockerfile` give you a private website
@@ -64,7 +65,7 @@ self-test and `--offline` work without any network.
 
 | Command | Result |
 |---|---|
-| `AUDIT.bat SOL` | Asks the timeframe, audits SOLUSDT → `audit/reports/` (.md, .json, tearsheet) + `audit/logs/audits.csv`, `signals.csv` |
+| `AUDIT.bat SOL` | Asks the timeframe, audits SOLUSDT → `audit/reports/` (.md, .json, `_chart.html`, tearsheet) + `audit/logs/audits.csv`, `signals.csv` |
 | `AUDIT.bat SOL --tf all` | Every timeframe, tells you which one (if any) has strategies that survive validation |
 | `AUDIT.bat SOL ARB INJ` | Several coins + a ranking |
 | `AUDIT.bat SOL --strategies trend,dip` | Restrict the library (ids, families or name fragments) — faster |

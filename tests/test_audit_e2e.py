@@ -40,6 +40,7 @@ def test_audit_structure(demo_audit):
     assert {x["name"] for x in a["research"]} >= {"Cointegrated pairs", "Funding / basis carry (delta-neutral)",
                                                   "Range-gated grid", "DCA accumulation (weekly)", "Funding / OI squeeze"}
     assert a["patterns"]["structure"] in {"bullish", "bearish", "mixed", "unknown"}
+    assert a["chart"]["symbol"] == "DEMOUSDT" and len(a["chart"]["candles"]) == 500 and a["chart"]["plan"]["stop"] == a["plan"]["stop"]
     for s in a["signals"]:
         assert set(au.SIGNAL_FIELDS) <= set(s)
         assert s["decision"] == "APPROVED" or s["decision"].startswith("BLOCKED")
