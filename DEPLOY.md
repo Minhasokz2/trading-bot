@@ -95,7 +95,7 @@ More tuning (fees, gates, risk caps, verdict thresholds): copy `audit/settings.t
 * Everything except `/healthz` sits behind HTTP Basic login over HTTPS (Render terminates TLS). Passwords are compared
   in constant time; 8 wrong passwords from one address lock it out for 10 minutes. The throttle is best effort (it keys on
   Render's `True-Client-IP`); the real protection is the long random password Render generates.
-* Every POST checks the `Origin` header, because browsers attach Basic credentials to cross-site form posts.
+* Every POST must come from this site's own pages (checked with the browser's `Sec-Fetch-Site` header, with `Origin` as the fallback), because browsers attach Basic credentials to cross-site form posts.
 * Reports are rendered with a strict Content-Security-Policy (no inline scripts); the HTML tearsheet runs sandboxed.
 * File access is by exact report name only; `..`, slashes and hidden files are refused.
 * There are **no exchange API keys anywhere**, and nothing in this project can place an order.

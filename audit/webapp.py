@@ -164,18 +164,25 @@ def credentials_ok(cred, cfg: WebConfig) -> bool:
 
 
 def same_origin(request: Request, cfg: WebConfig) -> bool:
+    """Is this POST from our own pages? Browsers send Sec-Fetch-Site and it cannot be forged by a web page, so it decides
+    when present. Older browsers fall back to the Origin header. (Never rely on Origin alone: a page served with
+    'Referrer-Policy: no-referrer' makes browsers send 'Origin: null' on its own form posts.)"""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        return site.lower() in ("same-origin", "none")
     origin = request.headers.get("origin")
     if not origin:
-        return True                                        # curl / scripts; browsers always send Origin on POST
+        return True                                        # curl / scripts; browsers always send Origin or Sec-Fetch-Site
     if origin == "null":
         return False
-    hosts = {request.headers.get("host", "").lower(), request.headers.get("x-forwarded-host", "").split(",")[0].strip().lower()}
+    hosts = {request.headers.get("host", "").lower(), request.headers.get("x-forwarded-host", "").split(",")[0].strip().lower(),
+             os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").lower()}
     return urlparse(origin).netloc.lower() in (hosts - {""}) or origin in cfg.allowed_origins
 
 
 def secure(resp: Response, csp: str = STRICT_CSP) -> Response:
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")      # NOT no-referrer: that makes browsers send Origin: null on forms
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Cache-Control", "no-store")
     resp.headers.setdefault("Content-Security-Policy", csp)

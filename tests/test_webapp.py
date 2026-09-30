@@ -131,6 +131,21 @@ def test_cross_site_posts_are_refused(web):
     assert fwd.status_code == 303                                             # behind a proxy the public host matches
 
 
+def test_real_browser_form_posts_are_accepted(web):
+    """Regression: a browser posting a form from our own page sends Sec-Fetch-Site: same-origin, and 'Origin: null'
+    if the page was served with Referrer-Policy: no-referrer (which we used to send). That must not be refused."""
+    same = {"sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate", "origin": "null"}
+    assert web.post("/jobs", data={"kind": "review"}, headers=same, follow_redirects=False).status_code == 303
+    assert web.post("/jobs", data={"kind": "review"}, headers={"sec-fetch-site": "same-origin", "origin": "https://anything.example"},
+                    follow_redirects=False).status_code == 303                # the browser's own verdict decides
+    assert web.post("/jobs", data={"kind": "review"}, headers={"sec-fetch-site": "none"}, follow_redirects=False).status_code == 303
+    for site in ("cross-site", "same-site"):
+        r = web.post("/jobs", data={"kind": "review"}, headers={"sec-fetch-site": site, "origin": "http://testserver"}, follow_redirects=False)
+        assert r.status_code == 403, site
+    # the page itself must not make browsers send Origin: null
+    assert web.get("/").headers["referrer-policy"] == "same-origin"
+
+
 # ---------------------------------------------------------------------- jobs
 def test_submit_audit_and_read_results(web):
     r = web.post("/jobs", data={"kind": "audit", "coins": "sol", "tf": "4h", "market": "on", "futures": "on"}, follow_redirects=False)

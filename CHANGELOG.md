@@ -2,6 +2,8 @@
 
 ## v6.1 — 2026-09-30 — hosting
 
+- **Fix: "Cross-site request refused" on every form in a real browser.** The pages were served with `Referrer-Policy: no-referrer`, which makes browsers send `Origin: null` on their own form posts, and the CSRF check refused that. The check now trusts the browser's `Sec-Fetch-Site` header (Origin only as a fallback) and the policy is `same-origin`.
+
 - **Web app** (`audit/webapp.py`, FastAPI): login (HTTP Basic, constant-time compare, failed-login throttle), a form to audit a
   coin or scan the market, live job log, rendered reports, the dashboard, a Connectivity page that tells you whether the server's
   region can reach Binance (HTTP 451 = wrong region), `/healthz`. Cross-site POSTs are refused, reports are served with a strict
