@@ -1,0 +1,5 @@
+# What the hosted web app needs (Docker image / Render): the engine + the web layer. No research-only packages.
+-r requirements-core.txt
+fastapi>=0.115
+uvicorn>=0.30
+markdown>=3.6               # renders the .md reports in the browser

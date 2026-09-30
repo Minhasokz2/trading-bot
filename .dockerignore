@@ -1,0 +1,24 @@
+# Keep the image small and free of local data
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+research
+freqtrade
+mac
+linux
+*.bat
+*.md
+LICENSE
+pyproject.toml
+requirements.txt
+requirements-lock.txt
+docker-compose*.yml
+audit/reports
+audit/logs
+audit/cache

@@ -58,3 +58,32 @@ def flat_frame() -> pd.DataFrame:
     df["open_time"] = df.index.as_unit("ms").asi8
     df["close_time"] = df["open_time"] + 4 * 3_600_000 - 1
     return df
+
+
+FAKE_AUDIT = '''
+import os, pathlib, sys, time
+args = sys.argv[1:]
+print("fake audit", " ".join(args), "| data dir:", os.environ.get("COIN_AUDIT_DATA_DIR"), flush=True)
+if "fail" in args:
+    sys.exit(3)
+if "unlisted" in args:
+    print("Auditing X on 4h ...\\n  ERROR: XUSDT is not listed on Binance Spot.", flush=True)
+    sys.exit(2)
+if "blocked" in args:
+    print("  ERROR: Could not reach Binance: Client error (451): Service unavailable from a restricted location", flush=True)
+    sys.exit(2)
+if "sleep" in args:
+    time.sleep(120)
+rep = pathlib.Path(os.environ["COIN_AUDIT_DATA_DIR"]) / "reports"
+rep.mkdir(parents=True, exist_ok=True)
+(rep / "SOLUSDT_4h_2026-01-01_0000.md").write_text("# Coin audit: SOLUSDT\\n\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n")
+print("  Report:", rep / "SOLUSDT_4h_2026-01-01_0000.md", flush=True)
+'''
+
+
+@pytest.fixture(scope="session")
+def fake_audit(tmp_path_factory) -> Path:
+    """A stand-in for audit.py that prints, can fail or hang on request, and writes one report."""
+    p = tmp_path_factory.mktemp("fake") / "fake_audit.py"
+    p.write_text(FAKE_AUDIT)
+    return p

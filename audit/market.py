@@ -27,10 +27,11 @@ import numpy as np
 import pandas as pd
 import requests
 
-from settings import CFG
+from settings import CFG, DATA_DIR
 
-CACHE = Path(__file__).resolve().parent / "cache"
-EVENTS = Path(__file__).resolve().parent / "events.csv"
+CACHE = DATA_DIR / "cache"
+# the event calendar: an edited copy on the data disk wins over the one shipped in the repo
+EVENTS = DATA_DIR / "events.csv" if (DATA_DIR / "events.csv").exists() else Path(__file__).resolve().parent / "events.csv"
 UNIVERSE_N = CFG["market"]["universe_size"]
 STABLES = {"usdt", "usdc", "dai", "fdusd", "usde", "tusd", "pyusd", "usdd", "busd", "usds", "frax", "lusd",
            "gusd", "usdp", "eurc", "rlusd", "usd1", "usdtb", "susds", "susde", "bsc-usd", "usdx", "usd0",
@@ -48,7 +49,7 @@ S = requests.Session()
 
 # ------------------------------------------------------------------- cache
 def _cached(name: str, max_age_h: float, fn):
-    CACHE.mkdir(exist_ok=True)
+    CACHE.mkdir(parents=True, exist_ok=True)
     p = CACHE / name
     if p.exists() and time.time() - p.stat().st_mtime < max_age_h * 3600:
         return pd.read_parquet(p) if p.suffix == ".parquet" else json.loads(p.read_text())

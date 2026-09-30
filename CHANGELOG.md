@@ -1,5 +1,23 @@
 # Changelog
 
+## v6.1 — 2026-09-30 — hosting
+
+- **Web app** (`audit/webapp.py`, FastAPI): login (HTTP Basic, constant-time compare, failed-login throttle), a form to audit a
+  coin or scan the market, live job log, rendered reports, the dashboard, a Connectivity page that tells you whether the server's
+  region can reach Binance (HTTP 451 = wrong region), `/healthz`. Cross-site POSTs are refused, reports are served with a strict
+  Content-Security-Policy, files are addressed by exact name only.
+- **Job runner and scheduler** (`audit/jobs.py`): every audit is a subprocess (an out-of-memory kill cannot take the site down),
+  jobs survive restarts, cancel and timeouts work, schedules run on candle closes and never overlap themselves, old reports are pruned.
+- **Deployment**: `Dockerfile` (unprivileged user, disk ownership fixed at start), `render.yaml`, `.dockerignore`, pinned
+  `requirements-web-lock.txt` (resolved on Python 3.12), `requirements` split into core / web / full, `docker/smoke_test.sh`,
+  `DEPLOY.md`, local launchers (`SERVE.bat`, `linux/serve.sh`, `mac/12 Web app`), a CI job that builds the image and smoke-tests it.
+- `COIN_AUDIT_DATA_DIR` moves reports, logs and caches onto a persistent disk; `settings.toml` and `events.csv` can be overridden there.
+- **Fix: audits now exit non-zero when an audit or scan reports an error** (they used to print the error and exit 0, so a scheduler
+  or job runner showed success). Failed jobs show the reason, with a region hint for HTTP 451.
+- Measured, replacing my earlier guesses: a full audit is ≈ 12 s of CPU and ≈ 500 MB of memory; the earlier "2 minutes" was
+  measured while other test jobs shared the CPUs.
+- Tests: 70+ new (runner, scheduler, web security, deployment-file consistency, real demo audit through the web routes).
+
 ## v6 — 2026-09-30 — "audit the auditor"
 
 Everything below runs offline on synthetic data in the test-suite; live endpoints are unchanged.
@@ -46,8 +64,8 @@ Everything below runs offline on synthetic data in the test-suite; live endpoint
 ### Bugs fixed on the way
 - Formation / indicator caches were keyed by `id(df)`; Python recycles object ids, so auditing several coins in one
   process (or the test-suite) could serve another frame's formations. Entries now keep a reference and check identity.
-- Every offline frame carried a `DataFrame.attrs` list that pandas 3 deep-copied on each operation (a 12-minute demo
-  audit became 2 minutes once removed); the data layer now strips `attrs` from anything it loads.
+- Every offline frame carried a `DataFrame.attrs` list that pandas 3 deep-copied on each operation (indicator calculation on
+  3000 candles dropped from 1.6 s to 0.7 s once removed); the data layer now strips `attrs` from anything it loads.
 - `review()` grading and the signal log migrate older CSV headers instead of misaligning columns.
 
 ### Engineering

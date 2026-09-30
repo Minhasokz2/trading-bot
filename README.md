@@ -1,4 +1,4 @@
-# Coin Audit Bot v6 — Binance Spot strategy research bot
+# Coin Audit Bot v6.1 — Binance Spot strategy research bot
 
 Everything here is free and open source. No API keys, no real orders: the audit is **read-only** and both
 Freqtrade bots run in **dry-run** (paper trading). Research tool, not financial advice.
@@ -22,6 +22,13 @@ much more hostile validation (12 gates, overfitting statistics, live-vs-backtest
 | `RESEARCH_VERDICT_BACKTEST.bat SOL` · `./linux/research_verdict_backtest.sh SOL` · `mac/11` | Replays the whole audit every 7 days over 6 months and grades the verdicts it gave ("audit the auditor"). |
 | `AUDIT.bat --review` | Grades past audits **and every logged signal**; builds the live track record that later audits use. |
 
+| `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The same audits in a password-protected web page on your own machine (`http://127.0.0.1:10000`). This is what gets hosted online. |
+| `docker/smoke_test.sh URL PASSWORD` | Checks a running web app (local, Docker or hosted): login wall, data-source reachability, a full demo audit. |
+
+**Host it online:** see [DEPLOY.md](DEPLOY.md) — a Render Blueprint (`render.yaml`) + `Dockerfile` give you a private website
+with a job queue, a candle-close scheduler for your watchlist, optional Discord/Telegram alerts and a persistent disk.
+It explains why Render fits and Vercel does not, what it costs in memory (≈ 500 MB per audit), and the region trap (Binance refuses the US).
+
 See [CHANGELOG.md](CHANGELOG.md) for the complete v6 list and the detector bugs the new tests caught.
 
 ## What's inside
@@ -34,6 +41,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the complete v6 list and the detector bugs 
 | `research/sweep_vectorbt.py` | 200+ parameter sets in seconds, picked on old data, scored on unseen data | polakowo/vectorbt |
 | `research/verdict_backtest.py` | Point-in-time replay of the whole audit, graded | — |
 | `freqtrade/` | 9 dry-run strategies (Trend, Donchian, Pullback, SMA Offset, BinCluc, Elliot, Confluence, EMA cross, FreqAI LightGBM) | freqtrade + TA-Lib, Docker image `stable_freqai` |
+| `audit/webapp.py` · `jobs.py` · `serve.py` · `Dockerfile` · `render.yaml` | Hosted web app: login, run form, job queue + scheduler, report viewer, dashboard, connectivity check | FastAPI, uvicorn |
 | `tests/` | Offline test-suite on synthetic data (see "Testing") | pytest |
 
 ## Setup
@@ -204,7 +212,11 @@ chooses the minimum verdict that triggers a push.
 * overfitting statistics (PBO on noise vs a real edge, deflated Sharpe, Benjamini-Hochberg), sizing, Markov regime,
   HAR-RV, higher-timeframe alignment, meta-labeler blocks;
 * offline client, point-in-time cuts, closed-candle rule, resampling;
-* the full pipeline: audit → report → logs → review → replay → scanner → watch loop → dashboard → CLI.
+* the full pipeline: audit → report → logs → review → replay → scanner → watch loop → dashboard → CLI;
+* the hosted app: login wall, failed-login throttle, cross-site POST refusal, path traversal, job queue / cancel /
+  restart recovery, candle-close scheduler, connectivity report, a real demo audit driven through the web routes;
+* the deployment files agree with the code: `render.yaml` vs the environment variables the app reads, the Dockerfile vs the
+  launcher and port, and every third-party import in `audit/` is declared in the hosted image's requirements.
 
 `python audit/audit.py --demo` runs one complete audit on synthetic data; GitHub Actions runs both on every push.
 
@@ -227,8 +239,9 @@ chooses the minimum verdict that triggers a push.
   is FRED's broad dollar, not ICE's DXY.
 - Patterns not implemented: Adam & Eve, bump and run, inverse cup & handle. Not available free: liquidation maps,
   unlock feeds, sector performance (add events to `audit/events.csv`).
-- A full 27-strategy audit on 3000 candles takes a few minutes; use `--strategies` to narrow the library, `--no-ml`
-  to skip the meta-labeler, and `--jobs` for scans.
+- A full 27-strategy audit on 3000 candles takes roughly 10–20 seconds of CPU and about 500 MB of memory (measured on
+  synthetic data; the first run of a coin also downloads its candles from Binance). Use `--strategies` to narrow the
+  library, `--no-ml` to skip the meta-labeler, and `--jobs` for scans.
 - Bearish patterns cannot be traded on spot; there is no short or futures execution anywhere. Live trading is not
   enabled: going live needs weeks of stable dry-run, a trading-only IP-restricted key and `"dry_run": false`.
 
@@ -249,6 +262,7 @@ strategy grids: `space` in `audit/strategies.py` · sweep grid: `GRID` in `resea
 
 | Version | Input | What was added |
 |---|---|---|
+| v6.1 | "host it on Render or Vercel" | Password-protected web app (FastAPI) with job queue, scheduler, report viewer, connectivity check; Docker image, Render Blueprint, smoke test, DEPLOY.md; audits now exit non-zero on failure; measured resource needs |
 | v6 | "make sure it has all these and enhance it" | Offline test-suite and synthetic data, 12 gates (PBO, deflated Sharpe, FDR), Kelly + slippage-at-size, Markov regime + HAR-RV, calibrated/conformal meta-labeler, scanner + allocation, watch loop + notifications + dashboard, `--as-of` replay and verdict backtest, signal grading feedback loop, settings file, kline cache, CI, five detector bugs fixed |
 | Mac | "create it for mac too" | 13 double-click launchers, Python finder, libomp, Gatekeeper instructions |
 | v5 | Chart-pattern list + macro/dominance brief | 15 pattern modules, pivot engine, bearish research, 21 candlesticks, pending formations; TOTAL/dominance rebuild, FRED macro, 8 regimes, eligibility score, derivatives fields, events.csv, squeeze, DCA |

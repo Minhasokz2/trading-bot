@@ -1,0 +1,35 @@
+# Render Blueprint for the Coin Audit web app. Step-by-step instructions: DEPLOY.md
+services:
+  - type: web
+    name: coin-audit
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # 2 GB RAM / 1 CPU. One audit peaks near 500 MB, so the 512 MB plans (free, starter) run out of memory.
+    plan: standard
+    # Binance refuses some countries (HTTP 451, notably the US). Frankfurt or Singapore work.
+    # A service's region cannot be changed after creation.
+    region: frankfurt
+    healthCheckPath: /healthz
+    # Reports, logs, candle caches and the live track record survive redeploys here.
+    disk:
+      name: coin-audit-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: COIN_AUDIT_PASSWORD      # Render generates a random one: Dashboard -> this service -> Environment
+        generateValue: true
+      - key: COIN_AUDIT_USER
+        value: admin
+      - key: COIN_AUDIT_DATA_DIR
+        value: /data
+      - key: COIN_AUDIT_TRUST_PROXY
+        value: "1"
+      # Scheduled runs (edit or delete in the Environment tab at any time):
+      - key: COIN_AUDIT_WATCHLIST     # coins to re-audit after every candle close ("" = none)
+        value: BTC,ETH,SOL
+      - key: COIN_AUDIT_WATCH_TF
+        value: 4h
+      - key: COIN_AUDIT_REVIEW_HOURS  # grade past signals and update the live track record
+        value: "24"
+      # Optional alerts: add DISCORD_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, in the Environment tab.

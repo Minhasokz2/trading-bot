@@ -90,3 +90,12 @@ def test_main_demo_cli(isolated_outputs, monkeypatch, universe_dir):
     rc = au.main(["--demo", "--no-ml", "--tf", "4h", "--strategies", "trend_ema_adx_v1,range_support_v1"])
     assert rc == 0
     assert list(au.REPORTS.glob("DEMOUSDT_4h_*.md"))
+
+
+def test_exit_code_is_nonzero_when_an_audit_fails(isolated_outputs, universe_dir):
+    """A failed audit must not look like success to whatever launched it (the hosted job runner, a scheduler, CI)."""
+    assert au.main(["--offline", str(universe_dir), "NOSUCHCOIN", "--tf", "4h", "--no-ml", "--no-tearsheet"]) == 2
+    assert au.main(["--offline", str(universe_dir), "DEMO", "NOSUCHCOIN", "--tf", "4h", "--no-ml", "--no-tearsheet",
+                    "--strategies", "trend_donchian_v1"]) == 2                      # one good coin does not hide a failed one
+    assert au.main(["--offline", str(universe_dir), "DEMO", "--tf", "4h", "--no-ml", "--no-tearsheet",
+                    "--strategies", "trend_donchian_v1"]) == 0

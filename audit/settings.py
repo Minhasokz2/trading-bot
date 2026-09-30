@@ -9,6 +9,8 @@ import os
 import tomllib
 from pathlib import Path
 
+__version__ = "6.1.0"
+
 DEFAULTS: dict = {
     "costs": {"fee": 0.001, "slippage": 0.0005, "maker_fee": 0.001, "futures_taker": 0.0005},
     "gates": {"min_profit_factor": 1.20, "min_trades": 20, "max_p_value": 0.10, "max_pbo": 0.50,
@@ -25,7 +27,21 @@ DEFAULTS: dict = {
     "meta": {"min_events": 150, "conformal_alpha": 0.20, "drift_psi_warn": 0.25},
     "notify": {"min_verdict": "FAVORABLE"},
 }
-PATH = Path(os.environ.get("COIN_AUDIT_SETTINGS", Path(__file__).resolve().parent / "settings.toml"))
+ROOT = Path(__file__).resolve().parent
+# Where reports, logs and caches live. Locally that is the audit/ folder; when hosted (Render, Docker) point
+# COIN_AUDIT_DATA_DIR at the persistent disk (e.g. /data) so nothing is lost on redeploy.
+DATA_DIR = Path(os.environ.get("COIN_AUDIT_DATA_DIR") or ROOT)
+
+
+def _settings_path() -> Path:
+    if os.environ.get("COIN_AUDIT_SETTINGS"):
+        return Path(os.environ["COIN_AUDIT_SETTINGS"])
+    if (DATA_DIR / "settings.toml").exists():                  # an edited copy on the persistent disk wins
+        return DATA_DIR / "settings.toml"
+    return ROOT / "settings.toml"
+
+
+PATH = _settings_path()
 
 
 def _merge(base: dict, over: dict) -> dict:

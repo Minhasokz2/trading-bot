@@ -25,3 +25,21 @@ jobs:
         run: python -m pytest -q --timeout=2400
       - name: Demo audit (offline)
         run: python audit/audit.py --demo --no-ml --tf 4h --strategies trend_ema_adx_v1,trend_donchian_v1,range_support_v1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t coin-audit .
+      - name: Run the container and smoke-test it (login wall, demo audit, report, dashboard)
+        run: |
+          docker run -d --name coin-audit -p 10000:10000 -e COIN_AUDIT_PASSWORD=ci-secret -v ca-data:/data coin-audit
+          docker/smoke_test.sh http://localhost:10000 ci-secret || { docker logs coin-audit; exit 1; }
+      - name: The app runs as an unprivileged user
+        run: test "$(docker exec coin-audit awk '/^Uid:/{print $2}' /proc/1/status)" = "10001"
+      - name: Job history survives a restart (persistent disk behaviour)
+        run: |
+          docker restart coin-audit
+          for i in $(seq 1 30); do curl -fs http://localhost:10000/healthz && break; sleep 2; done
+          curl -fs -u admin:ci-secret http://localhost:10000/api/jobs | grep -q "Demo check"

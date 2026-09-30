@@ -50,15 +50,15 @@ import strategies as st
 import validation as val
 from binance_client import (BinanceClient, BinanceError, FuturesClient, OfflineClient, OfflineFuturesClient,
                             to_ms)
-from settings import CFG
+from settings import CFG, DATA_DIR
 
 ROOT = Path(__file__).resolve().parent
-REPORTS = ROOT / "reports"
-LOG = ROOT / "logs" / "audits.csv"
-SIGNAL_LOG = ROOT / "logs" / "signals.csv"
-TRACK_RECORD = ROOT / "logs" / "track_record.json"
-KLINE_CACHE = ROOT / "cache" / "klines"
-DEMO_DIR = ROOT / "cache" / "demo"
+REPORTS = DATA_DIR / "reports"
+LOG = DATA_DIR / "logs" / "audits.csv"
+SIGNAL_LOG = DATA_DIR / "logs" / "signals.csv"
+TRACK_RECORD = DATA_DIR / "logs" / "track_record.json"
+KLINE_CACHE = DATA_DIR / "cache" / "klines"
+DEMO_DIR = DATA_DIR / "cache" / "demo"
 FT_CONFIG = ROOT.parent / "freqtrade" / "user_data" / "config.json"
 
 TIMEFRAMES = ["15m", "1h", "4h", "1d"]
@@ -760,8 +760,8 @@ def _json(o):
 
 
 def save(a: dict, tearsheet: bool = True) -> Path:
-    REPORTS.mkdir(exist_ok=True)
-    LOG.parent.mkdir(exist_ok=True)
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     stamp = a["audit_time_utc"].replace(" ", "_").replace(":", "")
     base = REPORTS / f"{a['symbol']}_{a['timeframe']}_{stamp}"
     k = 2
@@ -904,7 +904,7 @@ def review_signals(client, now: datetime | None = None) -> dict:
         w = csv.DictWriter(fh, fieldnames=SIGNAL_FIELDS, extrasaction="ignore")
         w.writeheader(); w.writerows(rows)
     track = track_record(rows, now)
-    TRACK_RECORD.parent.mkdir(exist_ok=True)
+    TRACK_RECORD.parent.mkdir(parents=True, exist_ok=True)
     TRACK_RECORD.write_text(json.dumps(track, indent=2), encoding="utf-8")
     print(f"Graded {updated} new signal(s); track record for {len(track)} strategies -> {TRACK_RECORD.name}")
     for k, v in sorted(track.items()):
@@ -1012,23 +1012,30 @@ def main(argv=None):
     strategies = [x.strip() for x in args.strategies.split(",")] if args.strategies else None
     use_market = not args.no_market and not (args.offline or args.demo)
 
-    def once():
+    def once() -> int:
+        """0 = everything worked; 2 = at least one audit (or the scan) reported an error."""
         if args.scan is not None:
-            return scan(args, tfs[0], now, strategies, use_market, client, fut)
-        return run_audits(client, fut, args, tfs, now, strategies, use_market)
+            return 0 if scan(args, tfs[0], now, strategies, use_market, client, fut) else 2
+        return 2 if run_audits(client, fut, args, tfs, now, strategies, use_market).errors else 0
 
+    rc = 0
     if args.loop:
         watch_loop(once, tfs[0], args.loop_max)
     else:
-        once()
+        rc = once()
     if args.dashboard or args.loop:
         print(f"  Dashboard: {dashboard.build(REPORTS, LOG, SIGNAL_LOG)}")
     print(f"\nLogs: {LOG} · {SIGNAL_LOG}")
-    return 0
+    return rc
 
 
-def run_audits(client, fut, args, tfs, now, strategies, use_market) -> list:
-    ranking = []
+class Ranking(list):
+    """The comparison rows of run_audits(); `.errors` counts audits that reported an error."""
+    errors = 0
+
+
+def run_audits(client, fut, args, tfs, now, strategies, use_market) -> Ranking:
+    ranking = Ranking()
     for coin in args.coins:
         for t in tfs:
             print(f"\nAuditing {coin.upper()} on {t} ...")
@@ -1036,7 +1043,9 @@ def run_audits(client, fut, args, tfs, now, strategies, use_market) -> list:
                 a = audit(client, fut, coin, args.quote.upper(), t, not args.no_ml, use_market, now=now,
                           strategies=strategies)
             except BinanceError as e:
-                print(f"  ERROR: {e}"); continue
+                print(f"  ERROR: {e}")
+                ranking.errors += 1
+                continue
             path = save(a, tearsheet=not args.no_tearsheet and not args.loop)
             print_summary(a)
             print(f"  Report: {path}")
@@ -1132,7 +1141,7 @@ def scan(args, tf, now, strategies, use_market, client, fut) -> Path | None:
     stamp = (now if isinstance(now, datetime) else datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M")
     note = (f"Universe: top {len(syms)} {quote} pairs by 24h volume (min ${CFG['scan']['min_volume_usd'] / 1e6:g}M), "
             f"leveraged tokens and stablecoins excluded; every coin ran the full audit pipeline.")
-    REPORTS.mkdir(exist_ok=True)
+    REPORTS.mkdir(parents=True, exist_ok=True)
     base = REPORTS / f"scan_{tf}_{stamp.replace(' ', '_').replace(':', '')}"
     Path(str(base) + ".md").write_text(portfolio.to_markdown(rows, alloc, tf, stamp, note), encoding="utf-8")
     Path(str(base) + ".json").write_text(json.dumps({"rows": rows, "allocation": alloc, "correlation_symbols": cs,
