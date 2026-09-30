@@ -1,5 +1,21 @@
 # Changelog
 
+## v6.1.1 — 2026-09-30 — first live audit crashed
+
+- **Fix: every first audit of a coin on a fresh install died in the regime step** with
+  `TypeError: loop of ufunc does not support argument 0 of type float which has no callable log method`
+  (`np.log(df["close"])`). The kline cache started from an empty, untyped DataFrame and pandas 3 no longer
+  ignores that in `concat`, so every column of the first fetch came back as `object`. The data layer now
+  types every frame it returns (`normalise_frame`), never concatenates with an empty frame, and repairs
+  cache files written by the broken version.
+- The cache refill after a long pause is contiguous (it used to stop after 5000 candles and could leave a
+  hole); a cache that fell too far behind is rebuilt instead.
+- Point-in-time fetches (`--as-of`) return the full number of candles asked for (they were one short).
+- The scanner's 24h-ticker list falls back to the public REST endpoint if the SDK's answer is not a list.
+- Tests: `tests/test_live_client.py` runs the real `BinanceClient` (pagination, cache, forming-candle rule,
+  replay view, ticker list, the full audit and the CLI incl. `--scan`) against a stand-in for the Binance
+  SDK — the code path a hosted audit takes, which nothing exercised before.
+
 ## v6.1 — 2026-09-30 — hosting
 
 - **Fix: "Cross-site request refused" on every form in a real browser.** The pages were served with `Referrer-Policy: no-referrer`, which makes browsers send `Origin: null` on their own form posts, and the CSRF check refused that. The check now trusts the browser's `Sec-Fetch-Site` header (Origin only as a fallback) and the policy is `same-origin`.

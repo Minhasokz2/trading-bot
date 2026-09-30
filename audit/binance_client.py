@@ -19,14 +19,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 
 KLINE_COLS = [
     "open_time", "open", "high", "low", "close", "volume", "close_time",
     "quote_volume", "trades", "taker_buy_base", "taker_buy_quote", "ignore",
 ]
 FRAME_COLS = KLINE_COLS[:-1]
+FLOAT_COLS = ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_base", "taker_buy_quote"]
+INT_COLS = ["open_time", "close_time", "trades"]
 TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000,
          "1d": 86_400_000, "1w": 604_800_000}
+MARKET_DATA_URL = "https://data-api.binance.vision"   # Binance's public market-data host (no key, read-only)
+MAX_REFILL = 3000                                      # a cache this many candles behind is rebuilt, not extended
 LEVERAGED = ("UP", "DOWN", "BEAR", "BULL")
 STABLE_BASES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USD1", "EUR", "EURI", "AEUR", "PYUSD",
                 "USDE", "XUSD", "USDD", "GUSD", "PAXG", "XAUT"}
@@ -45,20 +50,75 @@ def _plain(obj):
     return obj
 
 
+def _records(obj) -> list[dict]:
+    """A list of plain dicts out of whatever an SDK "list" endpoint returned (a list of models, a RootModel
+    dump wrapped in {"root": [...]}, or a single record)."""
+    obj = _plain(obj)
+    if isinstance(obj, dict):
+        if len(obj) == 1 and next(iter(obj)) in ("root", "actual_instance", "data"):
+            return _records(next(iter(obj.values())))
+        return [obj] if "symbol" in obj else []
+    if isinstance(obj, list):
+        return [x for x in (_plain(y) for y in obj) if isinstance(x, dict) and "symbol" in x]
+    return []
+
+
+def empty_frame() -> pd.DataFrame:
+    """A typed, empty kline frame (float prices and volumes, int64 times, UTC DatetimeIndex 'time')."""
+    cols = {c: pd.Series(dtype="float64") for c in FLOAT_COLS}
+    cols.update({c: pd.Series(dtype="int64") for c in INT_COLS})
+    return pd.DataFrame(cols, index=pd.DatetimeIndex([], tz="UTC", name="time"))[FRAME_COLS]
+
+
+def normalise_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Force the kline dtypes and a sorted, unique UTC index whatever produced the frame.
+
+    Every frame that leaves the data layer goes through here. The reason it exists: pandas 3 no longer
+    ignores an empty frame in `concat`, so `concat([pd.DataFrame(columns=...), candles])` turns every
+    column into `object` — `np.log(df["close"])` then fails with "loop of ufunc does not support argument
+    0 of type float", which is exactly how the first live audit on a fresh cache used to die."""
+    if df is None or len(df) == 0:
+        return empty_frame()
+    cols = [c for c in FRAME_COLS if c in df.columns]
+    out = df[cols].copy()
+    if "open_time" not in out.columns:
+        if not isinstance(out.index, pd.DatetimeIndex):
+            raise BinanceError("kline frame has neither open_time nor a datetime index")
+        out["open_time"] = epoch_ms(out.index.tz_localize("UTC") if out.index.tz is None else out.index)
+    for c in FLOAT_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
+    for c in INT_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    out = out.dropna(subset=[c for c in ("open", "high", "low", "close", "open_time") if c in out.columns])
+    for c in INT_COLS:
+        if c in out.columns:
+            out[c] = out[c].astype("int64")
+    if isinstance(out.index, pd.DatetimeIndex) and out.index.tz is not None:
+        out.index = out.index.tz_convert("UTC")
+    else:
+        out.index = pd.to_datetime(out["open_time"], unit="ms", utc=True)
+    out.index.name = "time"
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    out.attrs = {}
+    return out
+
+
+def merge_frames(*frames: pd.DataFrame) -> pd.DataFrame:
+    """Concatenate kline frames (later ones win on duplicate candles) without ever letting an empty frame
+    into `concat` (see normalise_frame)."""
+    parts = [f for f in frames if f is not None and len(f)]
+    if not parts:
+        return empty_frame()
+    return normalise_frame(pd.concat(parts) if len(parts) > 1 else parts[0])
+
+
 def to_frame(rows: list) -> pd.DataFrame:
-    df = pd.DataFrame(rows, columns=KLINE_COLS)
-    if df.empty:
-        return df
-    num = ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_base", "taker_buy_quote"]
-    df[num] = df[num].astype(float)
-    df["open_time"] = df["open_time"].astype("int64")
-    df["close_time"] = df["close_time"].astype("int64")
-    df["trades"] = df["trades"].astype(int)
-    df["time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df = df.drop(columns=["ignore"]).drop_duplicates("open_time")
-    df = df.set_index("time").sort_index()
-    df.attrs = {}
-    return df
+    if not rows:
+        return empty_frame()
+    df = pd.DataFrame(rows, columns=KLINE_COLS).drop(columns=["ignore"])
+    return normalise_frame(df)
 
 
 def epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
@@ -149,16 +209,21 @@ class BinanceClient:
     ticker / order book are rebuilt from candles."""
 
     def __init__(self, timeout_ms: int = 15000, retries: int = 3, cache_dir: str | Path | None = None,
-                 as_of=None):
-        from binance_common.constants import SPOT_REST_API_MARKET_URL
-        from binance_sdk_spot.spot import Spot, ConfigurationRestAPI
-        from binance_sdk_spot.rest_api.models import KlinesIntervalEnum
-        cfg = ConfigurationRestAPI(base_path=SPOT_REST_API_MARKET_URL, timeout=timeout_ms, retries=retries)
-        self.api = Spot(config_rest_api=cfg).rest_api
-        self._intervals = {e.value: e for e in KlinesIntervalEnum}
+                 as_of=None, api=None):
+        """`api` lets tests inject a stand-in for the SDK's REST API (same method names and response shapes)."""
+        if api is not None:
+            self.api, self._intervals = api, {k: k for k in TF_MS}
+        else:
+            from binance_common.constants import SPOT_REST_API_MARKET_URL
+            from binance_sdk_spot.spot import Spot, ConfigurationRestAPI
+            from binance_sdk_spot.rest_api.models import KlinesIntervalEnum
+            cfg = ConfigurationRestAPI(base_path=SPOT_REST_API_MARKET_URL, timeout=timeout_ms, retries=retries)
+            self.api = Spot(config_rest_api=cfg).rest_api
+            self._intervals = {e.value: e for e in KlinesIntervalEnum}
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.as_of_ms = to_ms(as_of)
         self._symbols = None
+        self.http_get = requests.get                     # plain-HTTP fallback for list endpoints (tests swap it)
 
     # ----------------------------------------------------------------- core
     def _call(self, fn, **kw):
@@ -197,10 +262,26 @@ class BinanceClient:
         return self._call(self.api.ticker24hr, symbol=symbol)
 
     def ticker_24h_all(self) -> list[dict]:
-        """24h tickers for every symbol (one call) — used by the market scanner."""
+        """24h tickers for every symbol (one call) — used by the market scanner. If the SDK's answer is not
+        the list of records the scanner needs, the public REST endpoint is read directly."""
         if self.as_of_ms is not None:
             raise BinanceError("--scan needs live tickers; it cannot run point-in-time")
-        return self._call(self.api.ticker24hr)
+        try:
+            rows = _records(self._call(self.api.ticker24hr))
+        except BinanceError:
+            rows = []
+        if len(rows) < 2:
+            rows = _records(self._http_json("/api/v3/ticker/24hr"))
+        if len(rows) < 2:
+            raise BinanceError("Could not read the 24h tickers from Binance (unexpected response)")
+        return rows
+
+    def _http_json(self, path: str):
+        try:
+            r = self.http_get(MARKET_DATA_URL + path, timeout=20, headers={"User-Agent": "coin-audit-bot"})
+            return r.json() if getattr(r, "status_code", 0) == 200 else None
+        except (requests.RequestException, ValueError) as e:
+            raise BinanceError(f"Could not reach Binance: {e}") from e
 
     def order_book(self, symbol: str, limit: int = 500) -> dict:
         if self.as_of_ms is not None:
@@ -243,29 +324,39 @@ class BinanceClient:
         return drop_forming(to_frame(rows))
 
     def klines(self, symbol: str, interval: str, bars: int = 1000, start_ms: int | None = None) -> pd.DataFrame:
+        # Binance's endTime bound includes the candle that was still forming at as_of; _cut removes it, so
+        # one extra candle is requested in point-in-time mode to still return `bars` closed ones.
+        extra = 1 if self.as_of_ms is not None else 0
         if start_ms is not None:
-            return _cut(self._klines_api(symbol, interval, bars, start_ms=start_ms, end_ms=self.as_of_ms), self.as_of_ms)
+            return _cut(self._klines_api(symbol, interval, bars + extra, start_ms=start_ms, end_ms=self.as_of_ms),
+                        self.as_of_ms).head(bars)
         if self.cache_dir is None:
-            return _cut(self._klines_api(symbol, interval, bars, end_ms=self.as_of_ms), self.as_of_ms)
+            return _cut(self._klines_api(symbol, interval, bars + extra, end_ms=self.as_of_ms), self.as_of_ms).tail(bars)
         return self._klines_cached(symbol, interval, bars)
 
     def _klines_cached(self, symbol: str, interval: str, bars: int) -> pd.DataFrame:
+        """The newest `bars` closed candles, served from `<cache_dir>/<SYMBOL>_<tf>.parquet` plus whatever
+        Binance has since. The file always holds a contiguous, typed, closed-candles-only series: a cache
+        that fell too far behind is rebuilt rather than extended with a hole in it."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path = self.cache_dir / f"{symbol}_{interval}.parquet"
-        cached = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=FRAME_COLS)
-        if len(cached):
-            cached = cached.sort_index()
-            if self.as_of_ms is None or int(cached["close_time"].iloc[-1]) < self.as_of_ms:
-                newer = self._klines_api(symbol, interval, 5000, start_ms=int(cached["open_time"].iloc[-1]) + 1,
-                                         end_ms=self.as_of_ms)
-                cached = pd.concat([cached, newer]) if len(newer) else cached
+        cached = normalise_frame(pd.read_parquet(path)) if path.exists() else empty_frame()
+        step = TF_MS.get(interval, TF_MS["1d"])
+        if len(cached) and (self.as_of_ms is None or int(cached["close_time"].iloc[-1]) < self.as_of_ms):
+            horizon = self.as_of_ms if self.as_of_ms is not None else int(time.time() * 1000)
+            last_open = int(cached["open_time"].iloc[-1])
+            missing = max(0, (horizon - last_open) // step)   # candles opened since the newest cached one
+            if missing > bars + MAX_REFILL:
+                cached = empty_frame()
+            elif missing:
+                newer = self._klines_api(symbol, interval, missing + 2, start_ms=last_open + 1, end_ms=self.as_of_ms)
+                cached = merge_frames(cached, newer)
         view = _cut(cached, self.as_of_ms)
         if len(view) < bars:                                # backfill older history
             end = int(view["open_time"].iloc[0]) - 1 if len(view) else self.as_of_ms
-            older = self._klines_api(symbol, interval, bars - len(view), end_ms=end)
-            if len(older):
-                cached = pd.concat([older, cached])
-        cached = cached[~cached.index.duplicated(keep="last")].sort_index()
+            extra = 1 if (self.as_of_ms is not None and not len(view)) else 0   # see klines()
+            older = self._klines_api(symbol, interval, bars - len(view) + extra, end_ms=end)
+            cached = merge_frames(older, cached)
         if len(cached):
             cached.to_parquet(path)
         return _cut(cached, self.as_of_ms).tail(bars)
@@ -372,12 +463,12 @@ class OfflineClient:
             if not finer:
                 raise BinanceError(f"{symbol}: no {tf} data and nothing finer to resample from")
             df = resample(self._full(symbol, finer[0]), tf)
-        df = df[FRAME_COLS] if all(c in df.columns for c in FRAME_COLS) else df
+        if "open_time" not in df.columns:
+            idx = pd.DatetimeIndex(df.index)
+            df = df.assign(open_time=epoch_ms(idx.tz_localize("UTC") if idx.tz is None else idx))
         if "close_time" not in df.columns:
             df = df.assign(close_time=df["open_time"].astype("int64") + TF_MS[tf] - 1)
-        df = df.sort_index()
-        df.attrs = {}                                            # parquet metadata can carry attrs: never keep them
-        self._frames[key] = df
+        self._frames[key] = normalise_frame(df)                 # typed columns, sorted unique index, no attrs
         return self._frames[key]
 
     # --------------------------------------------------------- interface
