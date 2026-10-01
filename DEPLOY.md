@@ -77,12 +77,12 @@ Region **Frankfurt** or **Singapore**, Instance type **Standard**, Health Check 
 | `COIN_AUDIT_DATA_DIR` | `/data` | Reports, logs, candle caches, job history, live track record. Must be the disk's mount path. |
 | `COIN_AUDIT_TRUST_PROXY` | `1` | Take the client address from a proxy header (needed behind Render for the failed-login throttle). |
 | `COIN_AUDIT_CLIENT_IP_HEADER` | `true-client-ip` | Which header carries the real client address. Render sits behind Cloudflare, so the socket address is shared; Render sets `True-Client-IP`. |
-| `COIN_AUDIT_WATCHLIST` | `BTC,ETH,SOL` | Coins re-audited after every candle close. Empty = nothing scheduled. Up to 10. |
+| `COIN_AUDIT_WATCHLIST` | `BTC,ETH,SOL` | Seeds the watchlist **once** (first start). After that edit it on the *Watchlist* page; it lives in `/data/watchlist.json`. |
 | `COIN_AUDIT_WATCH_TF` | `4h` | `15m`, `1h`, `4h`, `1d`. |
 | `COIN_AUDIT_SCHEDULE_ML` | `0` | `1` turns the ML meta-labeler on for scheduled runs (slower). |
 | `COIN_AUDIT_SCAN_HOURS` | `0` (off) | Run a market scan every N hours; `COIN_AUDIT_SCAN_N` (default 20) and `COIN_AUDIT_SCAN_TF` (default `4h`) shape it. |
 | `COIN_AUDIT_REVIEW_HOURS` | `24` | Grade past signals and refresh the live track record; `0` = off. |
-| `COIN_AUDIT_KEEP_DAYS` | `14` | Report retention. |
+| `COIN_AUDIT_KEEP_DAYS` | `14` | Report retention (the *Settings* page can override it, like the account size, risk per trade, alert threshold and a scheduled scan). |
 | `COIN_AUDIT_MAX_JOBS` | `1` | Audits running at once. Each needs ≈ 500 MB, so raise it only together with the instance size. |
 | `COIN_AUDIT_ALLOWED_ORIGINS` | – | Extra origins allowed to POST (only needed if you put another proxy or domain in front). |
 | `DISCORD_WEBHOOK_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | – | Alerts. Treat them as secrets. |
@@ -97,7 +97,7 @@ More tuning (fees, gates, risk caps, verdict thresholds): copy `audit/settings.t
   Render's `True-Client-IP`); the real protection is the long random password Render generates.
 * Every POST must come from this site's own pages (checked with the browser's `Sec-Fetch-Site` header, with `Origin` as the fallback), because browsers attach Basic credentials to cross-site form posts.
 * Pages carry a strict Content-Security-Policy: scripts only from `/static/` plus one hashed theme snippet, no inline
-  handlers. Raw HTML inside a report is shown as text. Stored chart pages are re-rendered from the report's JSON with the
+  handlers; the only outside connection a page may open is Binance's public market-data stream (live charts). Raw HTML inside a report is shown as text. Stored chart pages are re-rendered from the report's JSON with the
   current renderer; the HTML tearsheet runs sandboxed.
 * File access is by exact report name only; `..`, slashes and hidden files are refused.
 * There are **no exchange API keys anywhere**, and nothing in this project can place an order.
@@ -109,9 +109,11 @@ More tuning (fees, gates, risk caps, verdict thresholds): copy `audit/settings.t
 * **Deploys take a few seconds of downtime**: a service with a disk stops the old instance before starting the new one
   ([Render disks](https://render.com/docs/disks)). A job in flight is marked *interrupted*; jobs still waiting resume.
 * **One instance only.** A disk cannot be shared or scaled out, which is fine for this workload.
-* **Reading a result.** A finished job links to its report page: a summary card (verdict, plan, signals, a re-run button),
-  the chart with the plan drawn on the candles, then the full report. *Reports* lists every audit with verdict and score;
-  *Dashboard* shows the latest audit per coin.
+* **Reading a result.** A finished job links to the coin page: the trader brief (what to do now, the setup, the plan with
+  your position size, what would make it a buy, what would kill it), the live chart with the plan drawn on the candles,
+  the score history and the past audits; the full report is one click away. The *Overview* lists what to do now for
+  every coin, best score first. Charts stream from Binance into your browser; if your own network blocks that, they
+  poll this server every 5 seconds instead.
 * **Backups.** Render snapshots the disk every 24 hours and keeps them for at least 7 days (full-disk restore only).
 * **Memory kills.** If a job ends as *failed — killed, most likely out of memory*, use the next plan up or narrow the job
   with the *Only these strategies* box.

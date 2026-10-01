@@ -9,7 +9,7 @@ import os
 import tomllib
 from pathlib import Path
 
-__version__ = "6.2.0"
+__version__ = "7.0.0"
 
 DEFAULTS: dict = {
     "costs": {"fee": 0.001, "slippage": 0.0005, "maker_fee": 0.001, "futures_taker": 0.0005},
@@ -63,3 +63,28 @@ def load(path: Path | None = None) -> dict:
 
 
 CFG = load()
+
+
+def write_overrides(path, overrides: dict) -> None:
+    """Write `{section: {key: value}}` as a small TOML file (merged over whatever the file already holds).
+    tomllib has no writer; the values here are numbers, booleans and short strings, which is all we need."""
+    path = Path(path)
+    current: dict = {}
+    if path.exists():
+        with path.open("rb") as fh:
+            current = tomllib.load(fh)
+    merged = _merge(current, overrides)
+    lines = ["# Written by the Coin Audit web app (Settings page). Keys missing here keep the defaults in audit/settings.py."]
+    for section, values in merged.items():
+        if not isinstance(values, dict):
+            continue
+        lines += ["", f"[{section}]"]
+        for k, v in values.items():
+            if isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, (int, float)):
+                lines.append(f"{k} = {v!r}")
+            else:
+                lines.append(f'{k} = "{str(v).replace(chr(34), "")}"')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

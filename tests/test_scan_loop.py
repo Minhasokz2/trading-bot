@@ -45,7 +45,7 @@ def test_watch_loop_reruns_and_notifies(isolated, monkeypatch):
     rc = au.main(["--demo", "--no-ml", "--tf", "4h", "--strategies", "trend_donchian_v1", "--loop", "--loop-max", "2", "--notify"])
     assert rc == 0
     assert len(sleeps) == 1 and 30 <= sleeps[0] <= 4 * 3600 + 30
-    assert len(sent) == 2 and "DEMOUSDT 4h" in sent[0]
+    assert len(sent) == 2 and sent[0].startswith("DEMO/USDT · 4h") and "NOTHING TO DO YET" in sent[0]
     assert len(list(au.REPORTS.glob("DEMOUSDT_4h_*.md"))) == 2 and (au.REPORTS / "dashboard.html").exists()
 
 

@@ -323,6 +323,18 @@ class BinanceClient:
                     break
         return drop_forming(to_frame(rows))
 
+    def recent(self, symbol: str, interval: str, since_ms: int | None = None, limit: int = 60) -> list[list]:
+        """The newest candles INCLUDING the one still forming, as [open_time, o, h, l, c, v, closed] rows — the
+        live feed behind the chart. `since_ms` returns only candles that opened after that time."""
+        kw = {"symbol": symbol, "interval": self._intervals[interval], "limit": max(1, min(1000, limit))}
+        if since_ms is not None:
+            kw["start_time"] = int(since_ms) + 1
+        df = to_frame(self._call(self.api.klines, **kw))
+        now_ms = int(time.time() * 1000)
+        return [[int(t), float(o), float(h), float(l), float(c), float(v), bool(ct < now_ms)]
+                for t, o, h, l, c, v, ct in zip(epoch_ms(df.index), df["open"], df["high"], df["low"], df["close"],
+                                                 df["volume"], df["close_time"])]
+
     def klines(self, symbol: str, interval: str, bars: int = 1000, start_ms: int | None = None) -> pd.DataFrame:
         # Binance's endTime bound includes the candle that was still forming at as_of; _cut removes it, so
         # one extra candle is requested in point-in-time mode to still return `bars` closed ones.

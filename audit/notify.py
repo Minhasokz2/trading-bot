@@ -60,6 +60,9 @@ def signal_message(a: dict) -> str:
     """Compact, phone-friendly summary of one audit (used by --notify and the watch loop)."""
     p = a["plan"]
     approved = [s for s in a["signals"] if s["decision"] == "APPROVED"]
+    if a.get("brief"):                                        # the trader brief, when the audit carries one
+        import brief as _brief
+        return _brief.to_text(a["brief"]) + "\nresearch tool, not financial advice"
     lines = [f"{a['symbol']} {a['timeframe']}: {a['verdict']} {a['score']}/100 ({a['audit_time_utc']} UTC)"]
     reg = a.get("regime", {})
     if reg:

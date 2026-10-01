@@ -1,5 +1,36 @@
 # Changelog
 
+## v7.0 — 2026-10-01 — a trader's console: the brief, live charts, watchlist, settings
+
+- **Trader brief.** Every audit now opens with what a trader needs, in plain words (`audit/brief.py`): *what to do now*
+  (buy zone is live / wait for the pullback / wait for the breakout / nothing to do yet / stay out / data is stale, with the
+  concrete levels), *the setup in one paragraph* (trend on both timeframes, momentum, volatility, the coin against BTC,
+  volume and who is in control — every number from the checks' own metrics), *the plan* with the position size in dollars
+  and units for the configured account, *what would make this a buy*, *what would kill it*, what is for and against,
+  which strategies have a real edge on this coin (per-trade expectancy, win rate, trades a year, whether one is firing
+  and why it is blocked), risk notes and how much to trust it. It is the first section of the report, the card at the
+  top of the report page and the coin page, the terminal summary and the alert message.
+- **Charts are live.** After the audit the chart keeps moving: the browser subscribes to Binance's public kline stream
+  for the symbol (`data-stream.binance.vision`), draws the forming candle, appends closed ones and extends the EMAs; when
+  the stream is unreachable from the viewer's network it polls the server (`/api/live/{symbol}/{tf}`, cached for 3 s)
+  every 5 s. A status pill shows which. The opportunity panel shows the live price, the change since the audit and the
+  plan's status against it in words ("inside the entry zone — the buy zone is live", "+4% above the entry zone: do not
+  chase; wait for a pullback into …", "below the stop: the plan is invalid", pattern triggers and their distance).
+  Offline / replay audits say so instead.
+- **A console instead of a page** (`audit/webapp.py`): sidebar navigation with a quick "audit any coin" box; an
+  *Overview* with what to do now per coin (best score first), opportunity / favorable / signal counts, schedule and jobs;
+  *Audit* (full options + scanner); *coin pages* (`/coins/SOLUSDT`: brief, live chart, score history, past audits,
+  re-audit, watchlist toggle); a *Watchlist* you edit in the app (add, pause, remove, run now — stored in
+  `watchlist.json`, seeded once from `COIN_AUDIT_WATCHLIST`) that the scheduler re-reads on every tick; *Settings*
+  (account size and risk per trade → written to `settings.toml` on the data disk so every new audit uses them; alert
+  threshold; ML and alerts for scheduled runs; a scheduled market scan; retention; a test-alert button); *Reports*
+  with the action chip per audit; jobs that link to coin pages.
+- Security unchanged in spirit: one hashed inline snippet, scripts only from `/static/`, `connect-src` opened only to
+  the Binance stream host; the live API validates symbol and timeframe.
+- Tests: `tests/test_brief.py` (every action and the sentences behind it, on synthetic and real audits),
+  `tests/test_webapp_v7.py` (overview, coin page, watchlist → scheduler, settings → TOML, test alert, live API, caching),
+  the chart's live mode driven by a fake WebSocket in a real browser (when Playwright is present).
+
 ## v6.2 — 2026-09-30 — the chart, and a web app you would actually use
 
 - **Every audit now draws its opportunity on the coin's chart.** `audit/chart.py` + `audit/static/chart.js`: an

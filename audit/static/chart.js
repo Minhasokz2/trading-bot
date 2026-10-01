@@ -61,9 +61,10 @@
     return e;
   }
 
-  function Chart(root, d) {
+  function Chart(root, d, opts) {
     this.root = root;
     this.d = d;
+    this.opts = opts || {};
     this.c = d.candles || [];
     this.n = this.c.length;
     this.tfMs = d.tf_ms || 14400000;
@@ -77,6 +78,7 @@
     this.resetView();
     this.bind();
     this.resize();
+    this.live = new Live(this, this.opts);
   }
 
   Chart.prototype.build = function () {
@@ -87,6 +89,8 @@
     var title = el("div", "cc-title");
     title.appendChild(el("b", null, d.symbol || ""));
     title.appendChild(el("span", "cc-tf", " " + (d.timeframe || "") + (d.exchange ? " · " + d.exchange : "")));
+    this.liveStatus = el("span", "cc-live static", "");
+    title.appendChild(this.liveStatus);
     top.appendChild(title);
     this.legend = el("div", "cc-legend");
     top.appendChild(this.legend);
@@ -131,6 +135,9 @@
     panel.textContent = "";
     var vcls = { FAVORABLE: "good", WATCHLIST: "warning", NEUTRAL: "muted", AVOID: "critical" }[d.verdict] || "muted";
     var icon = { FAVORABLE: "✔", WATCHLIST: "◐", NEUTRAL: "○", AVOID: "✖" }[d.verdict] || "○";
+    this.liveBox = el("div", "cc-livebox");
+    this.liveBox.style.display = "none";
+    panel.appendChild(this.liveBox);
     var head = el("div", "cc-verdict " + vcls);
     head.appendChild(el("span", "cc-vicon", icon));
     head.appendChild(el("span", "cc-vname", d.verdict || "—"));
@@ -663,7 +670,140 @@
     item("", fmtDate(c[0], this.tfMs < 86400000));
   };
 
-  function mount(root, data) { return new Chart(root, data); }
+  // ------------------------------------------------------------------ live updates
+  Chart.prototype.updateCandle = function (c, closed) {
+    // c = [open_time, o, h, l, c, v]; the newest candle is replaced while it forms, a newer one is appended
+    if (!this.n) { this.c.push(c.slice(0, 6)); this.n = 1; this.formingClosed = !!closed; this.draw(); return; }
+    var last = this.c[this.n - 1], e = this.d.ema || {}, follow = this.view.to >= this.n - 0.5;
+    if (c[0] > last[0]) {
+      this.c.push(c.slice(0, 6)); this.n++;
+      for (var k in e) {                                      // extend each EMA with the standard recursion
+        var n = parseInt(k.replace("ema", ""), 10), a = 2 / (n + 1), prev = e[k][e[k].length - 1];
+        e[k].push(prev === null || prev === undefined ? null : a * c[4] + (1 - a) * prev);
+      }
+      if (follow) { this.view.from += 1; this.view.to += 1; }
+    } else if (c[0] === last[0]) {
+      last[1] = c[1]; last[2] = c[2]; last[3] = c[3]; last[4] = c[4]; last[5] = c[5];
+      for (var k2 in e) {
+        var n2 = parseInt(k2.replace("ema", ""), 10), a2 = 2 / (n2 + 1), arr = e[k2], p2 = arr.length >= 2 ? arr[arr.length - 2] : null;
+        if (arr.length === this.n && p2 !== null && p2 !== undefined) arr[arr.length - 1] = a2 * c[4] + (1 - a2) * p2;
+      }
+    } else {
+      return;                                                 // older than what we have: ignore
+    }
+    this.formingClosed = !!closed;
+    this.clampView();
+    this.draw();
+  };
+
+  function Live(chart, opts) {
+    this.chart = chart; this.d = chart.d; this.cfg = this.d.live || null;
+    this.server = opts && opts.server ? opts.server : null;
+    this.ws = null; this.pollTimer = null; this.retryTimer = null; this.watchdog = null;
+    this.lastMessage = 0; this.price = null; this.stopped = false; this.mode = "static";
+    this.start();
+  }
+  Live.prototype.setState = function (mode, text) {
+    this.mode = mode;
+    var el_ = this.chart.liveStatus;
+    el_.className = "cc-live " + mode;
+    el_.textContent = text;
+  };
+  Live.prototype.start = function () {
+    var self = this;
+    if (!this.cfg || !this.cfg.enabled) { this.setState("static", this.cfg && this.cfg.reason ? this.cfg.reason : "offline data"); return; }
+    this.setState("connecting", "connecting…");
+    if (this.server) this.poll(true);
+    this.connect();
+    this.watchdog = setInterval(function () {
+      if (self.mode === "live" && Date.now() - self.lastMessage > 90000) {       // a silent socket is a dead socket
+        try { self.ws.close(); } catch (e) { /* ignore */ }
+      }
+    }, 15000);
+    window.addEventListener("beforeunload", function () { self.stop(); });
+  };
+  Live.prototype.stop = function () {
+    this.stopped = true;
+    if (this.ws) { try { this.ws.close(); } catch (e) { /* ignore */ } }
+    clearTimeout(this.pollTimer); clearTimeout(this.retryTimer); clearInterval(this.watchdog);
+  };
+  Live.prototype.connect = function () {
+    var self = this, url = "wss://data-stream.binance.vision/ws/" + this.cfg.stream;
+    if (!window.WebSocket) { this.fallback("no WebSocket in this browser"); return; }
+    try { this.ws = new WebSocket(url); } catch (e) { this.fallback("blocked"); return; }
+    this.ws.onopen = function () { self.lastMessage = Date.now(); self.setState("live", "● live"); };
+    this.ws.onmessage = function (ev) {
+      var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      var k = m && m.k; if (!k) return;
+      self.lastMessage = Date.now();
+      self.apply([k.t, +k.o, +k.h, +k.l, +k.c, +k.v], !!k.x);
+    };
+    this.ws.onerror = function () { /* onclose follows */ };
+    this.ws.onclose = function () {
+      if (self.stopped) return;
+      self.fallback("stream closed");
+      self.retryTimer = setTimeout(function () { if (!self.stopped) self.connect(); }, 60000);
+    };
+  };
+  Live.prototype.fallback = function (why) {
+    if (this.server) { this.setState("polling", "◌ updating every 5 s"); this.poll(false); }
+    else this.setState("unavailable", "live feed unavailable (" + why + ")");
+  };
+  Live.prototype.poll = function (once) {
+    var self = this, c = this.chart.c, since = c.length ? c[c.length - 1][0] - 1 : 0;
+    clearTimeout(this.pollTimer);
+    fetch(this.server + "/" + encodeURIComponent(this.cfg.symbol) + "/" + encodeURIComponent(this.cfg.interval) + "?since=" + since,
+          { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+      .then(function (j) {
+        (j.candles || []).forEach(function (row) { self.apply(row.slice(0, 6), !!row[6]); });
+        if (!once && self.mode !== "live") self.pollTimer = setTimeout(function () { self.poll(false); }, 5000);
+      })
+      .catch(function () {
+        if (self.mode !== "live") { self.setState("unavailable", "live feed unavailable"); if (!once) self.pollTimer = setTimeout(function () { self.poll(false); }, 15000); }
+      });
+  };
+  Live.prototype.apply = function (candle, closed) {
+    this.chart.updateCandle(candle, closed);
+    this.price = candle[4];
+    this.renderBox();
+  };
+  Live.prototype.planStatus = function (price) {
+    var p = this.d.plan || {}, dec = this.chart.dec, approved = (this.d.signals || []).some(function (s) { return s.approved; });
+    if (typeof p.entry_low !== "number") return null;
+    function rel(x) { return fmtPct((price / x - 1) * 100); }
+    if (price <= p.stop) return { tone: "critical", text: "Below the stop (" + fmtPrice(p.stop, dec) + "): the plan is invalid. Wait for a fresh audit." };
+    if (price >= p.target2) return { tone: "good", text: "Above target 2 (" + fmtPrice(p.target2, dec) + "): the move played out; re-audit for the next plan." };
+    if (price >= p.target1) return { tone: "good", text: "Above target 1 (" + fmtPrice(p.target1, dec) + "), " + rel(p.target1) + " past it: profit-taking zone." };
+    if (price >= p.entry_low && price <= p.entry_high) return { tone: "accent", text: "Inside the entry zone " + fmtPrice(p.entry_low, dec) + "–" + fmtPrice(p.entry_high, dec) + (approved ? ": the buy zone is live." : ": reference only, no approved signal.") };
+    if (price > p.entry_high) return { tone: "warning", text: rel(p.entry_high) + " above the entry zone: do not chase; wait for a pullback into " + fmtPrice(p.entry_low, dec) + "–" + fmtPrice(p.entry_high, dec) + "." };
+    return { tone: "warning", text: Math.abs((price / p.entry_low - 1) * 100).toFixed(2) + "% below the entry zone, still above the stop: the setup is stretched; a close back above " + fmtPrice(p.entry_low, dec) + " re-enters the zone." };
+  };
+  Live.prototype.renderBox = function () {
+    var box = this.chart.liveBox, dec = this.chart.dec, p = this.d.plan || {}, price = this.price;
+    if (!box || price === null) return;
+    box.style.display = "";
+    box.textContent = "";
+    var head = el("div", "cc-liveprice");
+    head.appendChild(el("b", null, fmtPrice(price, dec)));
+    if (typeof p.price === "number") {
+      var ch = (price / p.price - 1) * 100, sp = el("span", ch >= 0 ? "up" : "down", " " + fmtPct(ch) + " since the audit");
+      head.appendChild(sp);
+    }
+    head.appendChild(el("span", "cc-livemode", this.mode === "live" ? " · streaming" : this.mode === "polling" ? " · 5 s updates" : ""));
+    box.appendChild(head);
+    var st = this.planStatus(price);
+    if (st) box.appendChild(el("div", "cc-livestatus " + st.tone, st.text));
+    var bull = (this.d.patterns || []).filter(function (x) { return x.kind === "bullish"; });
+    if (bull.length) {
+      var x = bull[0], dist = (x.trigger / price - 1) * 100;
+      box.appendChild(el("div", "cc-muted", x.name.replace(/_/g, " ") + " trigger " + fmtPrice(x.trigger, dec) + " is " + (dist >= 0 ? fmtPct(dist) + " above" : fmtPct(dist) + " below") + " the live price."));
+    }
+    var last = this.chart.c[this.chart.n - 1];
+    if (last) box.appendChild(el("div", "cc-stamp", "Current " + (this.d.timeframe || "") + " candle opened " + fmtDate(last[0], true) + (this.chart.formingClosed ? " (closed)" : " (forming)")));
+  };
+
+  function mount(root, data, opts) { return new Chart(root, data, opts); }
   function auto() {
     var nodes = document.querySelectorAll("[data-coin-chart]");
     for (var i = 0; i < nodes.length; i++) {
@@ -672,13 +812,16 @@
       var src = document.getElementById(node.getAttribute("data-coin-chart"));
       if (!src) continue;
       try {
-        mount(node, JSON.parse(src.textContent));
+        var inst = mount(node, JSON.parse(src.textContent), { server: node.getAttribute("data-live-server") || null });
         node.setAttribute("data-mounted", "1");
+        charts.push(inst);
       } catch (e) {
         node.textContent = "Chart could not be drawn: " + e.message;
       }
     }
   }
-  window.CoinChart = { mount: mount, auto: auto, version: 1 };
+  var charts = [];
+  window.CoinChart = { mount: mount, auto: auto, version: 2, charts: charts,
+                       redraw: function () { charts.forEach(function (c) { c.draw(); }); } };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", auto); else auto();
 })();

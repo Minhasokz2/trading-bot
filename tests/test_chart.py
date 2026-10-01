@@ -173,3 +173,59 @@ def test_chart_renders_in_a_real_browser(frame, tmp_path):
     assert res["box"] and res["box"]["width"] > 500 and res["box"]["height"] > 250
     assert res["painted"] > 5000                                            # candles, lines and boxes were actually drawn
     assert "EMA20" in res["legend"] and "WATCHLIST" in res["panel"] and "double bottom" in res["panel"] and "APPROVED" in res["panel"]
+
+
+LIVE_JS = """
+const { chromium } = require("playwright");
+(async () => {
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 800 } });
+  await ctx.addInitScript(() => {
+    class FakeWS {                                      // Binance kline stream stand-in: 6 updates, then a new candle
+      constructor(url) { window.__ws = url; this.n = 0; setTimeout(() => { this.onopen && this.onopen({}); this.tick(); }, 30); }
+      tick() {
+        if (this.closed) return;
+        const d = JSON.parse(document.getElementById("coin-chart-data").textContent), last = d.candles[d.candles.length - 1];
+        this.n++;
+        const t = this.n <= 6 ? last[0] + d.tf_ms : last[0] + 2 * d.tf_ms, c = last[4] * (1 + 0.01 * this.n);
+        this.onmessage && this.onmessage({ data: JSON.stringify({ k: { t, o: String(last[4]), h: String(c * 1.001), l: String(last[4] * 0.999), c: String(c), v: "5", x: this.n === 6 } }) });
+        if (this.n < 9) setTimeout(() => this.tick(), 40);
+      }
+      close() { this.closed = true; }
+    }
+    window.WebSocket = FakeWS;
+  });
+  const page = await ctx.newPage();
+  const problems = [];
+  page.on("pageerror", e => problems.push("pageerror: " + e.message));
+  await page.goto("file://" + process.argv[2], { waitUntil: "load" });
+  await page.waitForTimeout(900);
+  const out = { problems, ws: await page.evaluate(() => window.__ws), status: await page.textContent(".cc-live"),
+                box: (await page.textContent(".cc-livebox")).replace(/\\s+/g, " "), n: await page.evaluate(() => window.CoinChart.charts[0].n),
+                ema: await page.evaluate(() => window.CoinChart.charts[0].d.ema.ema20.length) };
+  console.log(JSON.stringify(out));
+  await browser.close();
+})().catch(e => { console.log(JSON.stringify({ problems: ["crash: " + e.message] })); });
+"""
+
+
+@pytest.mark.skipif(not _playwright_available(), reason="needs node + the playwright module + chromium")
+def test_chart_keeps_streaming_after_the_audit(frame, tmp_path):
+    """The live mode: candles arrive over Binance's kline stream (faked here), the forming candle is replaced, a new one
+    appended, the EMAs extended and the plan re-read against the live price."""
+    a = fake_audit_result(frame, offline=False)
+    a["chart"] = chart.build(a, frame, window=120)
+    assert a["chart"]["live"] == {"enabled": True, "symbol": "DEMOUSDT", "interval": "4h", "stream": "demousdt@kline_4h"}
+    html_path = tmp_path / "live_chart.html"
+    html_path.write_text(chart.standalone_html(a), encoding="utf-8")
+    script = tmp_path / "live.js"
+    script.write_text(LIVE_JS)
+    env = {**os.environ, "NODE_PATH": subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()}
+    out = subprocess.run(["node", str(script), str(html_path)], capture_output=True, text=True, timeout=120, env=env)
+    res = json.loads(out.stdout.strip().splitlines()[-1])
+    assert res["problems"] == [], res
+    assert res["ws"] == "wss://data-stream.binance.vision/ws/demousdt@kline_4h" and res["status"].strip() == "● live"
+    assert res["n"] == 122 and res["ema"] == 122                               # the forming candle, then the next one
+    assert "since the audit" in res["box"] and "above the entry zone" in res["box"]
+    assert chart.live_descriptor({**a, "offline": True})["enabled"] is False
+    assert chart.live_descriptor({**a, "point_in_time": True})["reason"].startswith("point-in-time")

@@ -35,6 +35,7 @@ import pandas as pd
 
 import analyses
 import analytics
+import brief
 import chart
 import dashboard
 import market as mk
@@ -482,6 +483,7 @@ def audit(client, fut, coin: str, quote: str, tf: str, use_ml: bool, use_market:
            "market_regime": mreg, "track_record": {k: v for k, v in track.items() if k in {r["id"] for r in rows}},
            "_qs": (qret, bench, best[0].name)}
     out["chart"] = chart.build(out, df, tick=tick)                 # the candles with the plan drawn on them
+    out["brief"] = brief.build(out)                                # the same result in a trader's words
     return out
 
 
@@ -629,6 +631,8 @@ def to_markdown(a: dict) -> str:
     L = [f"# Coin audit: {a['symbol']} · {a['timeframe']}", "",
          f"**Verdict: {a['verdict']} — {a['score']}/100**", "", a["verdict_text"], ""]
     L += [f"> ⚠ {f}" for f in a["flags"]] + ([""] if a["flags"] else [])
+    if a.get("brief"):
+        L += brief.to_markdown(a["brief"])
     if a.get("chart_file"):
         L += [f"📈 **Interactive chart with the plan drawn on the candles:** [{a['chart_file']}]({a['chart_file']})", ""]
     L += [f"Audited {a['audit_time_utc']} UTC · {a['candles']} {a['timeframe']} candles to {a['data_until_utc']} UTC · "
@@ -748,6 +752,11 @@ def print_summary(a: dict):
         print(f"  > {s['strategy_id']}: {s['decision']} (confidence {s['confidence']:.0%}{extra}, "
               f"risk {s['max_risk_fraction']:.2%})")
     p = a["plan"]
+    b = a.get("brief")
+    if b:
+        print(f"\n  >>> {b['action']['label'].upper()}: {b['action']['text']}")
+        for x in b["would_buy"][:3]:
+            print(f"      would become a buy if: {x}")
     print(f"\n  {a['verdict_text']}")
     print(f"  Entry {fmt_px(p['entry_low'])} – {fmt_px(p['entry_high'])} | stop {fmt_px(p['stop'])} | "
           f"T1 {fmt_px(p['target1'])} | T2 {fmt_px(p['target2'])}")

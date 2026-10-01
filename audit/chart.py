@@ -62,6 +62,16 @@ ul.cc-list { list-style:none; margin:0; padding:0; } .cc-list li { padding:4px 0
 .cc-list li.forming b { color:var(--warning); } .cc-list li.bear b { color:var(--critical); }
 .cc-muted { color:var(--ink2); margin:6px 0; } .cc-stamp { color:var(--muted); font-size:12px; margin-top:12px; }
 .cc-help { color:var(--muted); font-size:12px; margin-top:8px; }
+.cc-live { margin-left:10px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; border:1px solid var(--border); color:var(--muted); vertical-align:middle; }
+.cc-live.live { color:var(--good); border-color:var(--good); animation:ccpulse 2s ease-in-out infinite; }
+.cc-live.polling { color:var(--warning); border-color:var(--warning); } .cc-live.connecting { color:var(--ink2); }
+.cc-live.unavailable { color:var(--critical); border-color:var(--critical); }
+@keyframes ccpulse { 0%, 100% { opacity:1; } 50% { opacity:.55; } }
+.cc-livebox { background:var(--plane); border:1px solid var(--border); border-radius:8px; padding:8px 10px; margin-bottom:10px; }
+.cc-liveprice { font-size:18px; font-variant-numeric:tabular-nums; } .cc-liveprice span { font-size:12px; }
+.cc-liveprice .up { color:var(--good); } .cc-liveprice .down { color:var(--critical); } .cc-livemode { color:var(--muted); }
+.cc-livestatus { margin-top:4px; font-size:13px; } .cc-livestatus.good { color:var(--good); } .cc-livestatus.critical { color:var(--critical); }
+.cc-livestatus.warning { color:var(--warning); } .cc-livestatus.accent { color:var(--accent); }
 """
 
 
@@ -160,15 +170,29 @@ def build(a: dict, df: pd.DataFrame, window: int = WINDOW, tick: float = 0.0) ->
             "structure": pats.get("structure"),
             "regime": {"trend": reg.get("trend_state"), "vol": reg.get("vol_state"), "btc": reg.get("btc"),
                        "market": mr.get("regime")} if reg else None,
-            "audit_time_utc": a.get("audit_time_utc", ""), "data_until_utc": a.get("data_until_utc", ""), "window": n}
+            "audit_time_utc": a.get("audit_time_utc", ""), "data_until_utc": a.get("data_until_utc", ""), "window": n,
+            "live": live_descriptor(a)}
 
 
-def embed_html(chart: dict, element_id: str = "coin-chart", inline_script: bool = False) -> str:
+def live_descriptor(a: dict) -> dict:
+    """Where the browser can keep the chart moving after the audit: Binance's public kline stream for the
+    symbol (and the web app's /api/live endpoint as the fallback). Offline / replay audits have no feed."""
+    sym, tf = a["symbol"], a["timeframe"]
+    if a.get("offline"):
+        return {"enabled": False, "reason": "offline data — no live feed", "symbol": sym, "interval": tf}
+    if a.get("point_in_time"):
+        return {"enabled": False, "reason": "point-in-time replay — no live feed", "symbol": sym, "interval": tf}
+    return {"enabled": tf in TF_MS, "symbol": sym, "interval": tf, "stream": f"{sym.lower()}@kline_{tf}"}
+
+
+def embed_html(chart: dict, element_id: str = "coin-chart", inline_script: bool = False, live_server: str | None = None) -> str:
     """The chart container plus its data. With `inline_script` the renderer is embedded (file:// reports);
-    otherwise the page loads /static/chart.js (the web app)."""
+    otherwise the page loads /static/chart.js (the web app). `live_server` is the polling endpoint the
+    browser falls back to when Binance's stream is unreachable (the web app passes /api/live)."""
     data = json.dumps(chart, separators=(",", ":"), default=_json).replace("<", "\\u003c")
+    srv = f' data-live-server="{E(live_server)}"' if live_server else ""
     frag = (f'<script type="application/json" id="{E(element_id)}-data">{data}</script>'
-            f'<div class="coin-chart" id="{E(element_id)}" data-coin-chart="{E(element_id)}-data"></div>')
+            f'<div class="coin-chart" id="{E(element_id)}" data-coin-chart="{E(element_id)}-data"{srv}></div>')
     return frag + (f"<script>{CHART_JS}</script>" if inline_script else '<script src="/static/chart.js"></script>')
 
 

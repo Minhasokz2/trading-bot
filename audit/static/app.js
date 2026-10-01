@@ -15,6 +15,15 @@
     });
   }
 
+  // ---- sidebar on small screens
+  var burger = document.getElementById("burger"), side = document.getElementById("side");
+  if (burger && side) {
+    burger.addEventListener("click", function (e) { e.stopPropagation(); side.classList.toggle("open"); });
+    document.addEventListener("click", function (e) {
+      if (side.classList.contains("open") && !side.contains(e.target)) side.classList.remove("open");
+    });
+  }
+
   // ---- reports page: filter rows as you type
   var filter = document.getElementById("filter");
   if (filter) {
@@ -75,8 +84,8 @@
     stage.textContent = terminal.indexOf(j.status) >= 0 ? "" : stageOf(j.log || "");
     if (j.reports && j.reports.length) {
       links.textContent = "";
-      j.reports.forEach(function (n) { links.appendChild(link("/reports/" + encodeURIComponent(n), "📄 " + n.replace(/\.md$/, ""), "btn small")); links.appendChild(document.createTextNode(" ")); });
-      (j.charts || []).forEach(function (n) { links.appendChild(link("/reports/" + encodeURIComponent(n), "📈 chart", "btn secondary small")); links.appendChild(document.createTextNode(" ")); });
+      (j.coins || []).forEach(function (c) { links.appendChild(link("/coins/" + encodeURIComponent(c), "\ud83d\udcc8 " + c, "btn small")); links.appendChild(document.createTextNode(" ")); });
+      j.reports.forEach(function (n) { links.appendChild(link("/reports/" + encodeURIComponent(n), "\ud83d\udcc4 " + n.replace(/\.md$/, ""), "btn secondary small")); links.appendChild(document.createTextNode(" ")); });
     }
     if (terminal.indexOf(j.status) >= 0 && cancel) cancel.style.display = "none";
   }

@@ -386,6 +386,112 @@ def prune_reports(reports_dir, keep_days: float = 14, now: float | None = None) 
     return removed
 
 
+# ---------------------------------------------------------------- watchlist
+class Watchlist:
+    """Coins the scheduler re-audits after every candle close, kept in <data_dir>/watchlist.json so the web app
+    can edit it. Seeded once from COIN_AUDIT_WATCHLIST / COIN_AUDIT_WATCH_TF when the file does not exist."""
+
+    def __init__(self, path, env=None):
+        self.path = Path(path)
+        self._lock = threading.RLock()
+        if not self.path.exists():
+            env = os.environ if env is None else env
+            wl = (env.get("COIN_AUDIT_WATCHLIST") or "").strip()
+            tf = (env.get("COIN_AUDIT_WATCH_TF") or "4h").strip().lower()
+            entries = []
+            if wl:
+                try:
+                    entries = [{"symbol": self.norm(c), "tf": tf if tf in TF_SECONDS else "4h", "enabled": True, "added": now_iso()}
+                               for c in parse_coins(wl)]
+                except JobError:
+                    entries = []
+            if entries:
+                self._write(entries)
+
+    @staticmethod
+    def norm(symbol: str) -> str:
+        """Entries are full Binance symbols (SOL -> SOLUSDT) so they match the audits on disk."""
+        c = parse_coins(symbol)[0]
+        return c if c.endswith("USDT") else c + "USDT"
+
+    def _read(self) -> list[dict]:
+        data = _read_json(self.path) or {}
+        return [e for e in data.get("entries", []) if isinstance(e, dict) and e.get("symbol")]
+
+    def _write(self, entries: list[dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(self.path, {"entries": entries, "updated": now_iso()})
+
+    def entries(self) -> list[dict]:
+        with self._lock:
+            return self._read()
+
+    def add(self, symbol: str, tf: str = "4h") -> dict:
+        coin = self.norm(symbol)
+        tf = (tf or "4h").lower()
+        if tf not in TF_SECONDS:
+            raise JobError("Timeframe must be 15m, 1h, 4h or 1d.")
+        with self._lock:
+            entries = self._read()
+            for e in entries:
+                if e["symbol"] == coin and e["tf"] == tf:
+                    e["enabled"] = True
+                    self._write(entries)
+                    return e
+            if len(entries) >= 40:
+                raise JobError("The watchlist holds at most 40 entries.")
+            e = {"symbol": coin, "tf": tf, "enabled": True, "added": now_iso()}
+            entries.append(e)
+            self._write(entries)
+            return e
+
+    def remove(self, symbol: str, tf: str) -> bool:
+        with self._lock:
+            entries = self._read()
+            keep = [e for e in entries if not (e["symbol"] == self.norm(symbol) and e["tf"] == tf)]
+            if len(keep) != len(entries):
+                self._write(keep)
+                return True
+            return False
+
+    def set_enabled(self, symbol: str, tf: str, enabled: bool) -> bool:
+        with self._lock:
+            entries = self._read()
+            hit = False
+            for e in entries:
+                if e["symbol"] == self.norm(symbol) and e["tf"] == tf:
+                    e["enabled"], hit = bool(enabled), True
+            if hit:
+                self._write(entries)
+            return hit
+
+    def schedules(self, ml: bool = False, notify: bool = False) -> list[dict]:
+        """One schedule per timeframe with every enabled coin (at most MAX_COINS each, newest dropped first)."""
+        by_tf: dict = {}
+        for e in self.entries():
+            if e.get("enabled", True):
+                by_tf.setdefault(e["tf"], []).append(e["symbol"])
+        out = []
+        for tf in sorted(by_tf, key=lambda t: TF_SECONDS[t]):
+            coins = by_tf[tf][:MAX_COINS]
+            out.append({"name": f"watchlist:{tf}", "kind": "audit", "when": f"candle:{tf}",
+                        "params": {"coins": coins, "tf": tf, "ml": ml, "notify": notify}})
+        return out
+
+
+def user_settings(path) -> dict:
+    """Settings the web app's Settings page keeps in <data_dir>/user_settings.json (everything optional)."""
+    return _read_json(Path(path)) or {}
+
+
+def save_user_settings(path, values: dict) -> dict:
+    cur = user_settings(path)
+    cur.update(values)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _write_json(Path(path), cur)
+    return cur
+
+
 # --------------------------------------------------------------- scheduling
 def notify_configured(env=None) -> bool:
     env = os.environ if env is None else env
@@ -454,8 +560,14 @@ def describe(when: str) -> str:
 
 class Scheduler:
     def __init__(self, manager: JobManager, schedules: list[dict], state_path, *, clock=time.time, grace: float = 60.0,
-                 min_free_mb: int = 100, reports_dir=None, keep_days: float = 14):
-        self.manager, self.schedules = manager, schedules
+                 min_free_mb: int = 100, reports_dir=None, keep_days: float = 14, watchlist: "Watchlist | None" = None,
+                 options=None, dynamic=None):
+        self.manager, self.static_schedules = manager, [s for s in schedules if not s["name"].startswith("watchlist")]
+        self.watchlist = watchlist
+        self.options = options or (lambda: {})               # callable -> {"ml": bool, "notify": bool}
+        self.dynamic = dynamic or (lambda: [])                # callable -> extra schedules (the Settings page's scan)
+        if watchlist is None:
+            self.static_schedules = list(schedules)
         self.state_path = Path(state_path)
         self.clock, self.grace, self.min_free_mb = clock, grace, min_free_mb
         self.reports_dir, self.keep_days = reports_dir, keep_days
@@ -465,6 +577,14 @@ class Scheduler:
 
     def state(self) -> dict:
         return _read_json(self.state_path) or {}
+
+    @property
+    def schedules(self) -> list[dict]:
+        """Static schedules (scan, review, env watchlist) plus the editable watchlist's, re-read on every call."""
+        if self.watchlist is None:
+            return self.static_schedules + list(self.dynamic() or [])
+        o = self.options() or {}
+        return self.static_schedules + self.watchlist.schedules(bool(o.get("ml")), bool(o.get("notify"))) + list(self.dynamic() or [])
 
     def status(self) -> list[dict]:
         st, now = self.state(), self.clock()

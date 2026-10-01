@@ -1,4 +1,4 @@
-# Coin Audit Bot v6.2 — Binance Spot strategy research bot
+# Coin Audit Bot v7 — Binance Spot strategy research bot
 
 Everything here is free and open source. No API keys, no real orders: the audit is **read-only** and both
 Freqtrade bots run in **dry-run** (paper trading). Research tool, not financial advice.
@@ -8,6 +8,11 @@ LONG setup is worth taking: a 0–100 score, a verdict (FAVORABLE ≥ 70 · WATC
 AVOID < 40), a trade plan sized for your account, and a full report. v6 adds a market scanner, a watch
 loop with notifications, a dashboard, point-in-time replays that grade the bot's own verdicts, and a
 much more hostile validation (12 gates, overfitting statistics, live-vs-backtest drift detection).
+
+**New in v7:** every audit opens with a **trader brief** — what to do now, the setup in one paragraph, the plan with your
+position size, what would make it a buy, what would kill it, which strategies really have an edge here — and the chart
+**keeps streaming live** after the analysis (Binance's public stream, server fallback), re-reading the plan against the
+live price. The web app is a console: overview, coin pages, an editable watchlist that drives the scheduler, settings.
 
 **New in v6 — start here**
 
@@ -22,7 +27,7 @@ much more hostile validation (12 gates, overfitting statistics, live-vs-backtest
 | `RESEARCH_VERDICT_BACKTEST.bat SOL` · `./linux/research_verdict_backtest.sh SOL` · `mac/11` | Replays the whole audit every 7 days over 6 months and grades the verdicts it gave ("audit the auditor"). |
 | `AUDIT.bat --review` | Grades past audits **and every logged signal**; builds the live track record that later audits use. |
 
-| `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The same audits in a password-protected web page on your own machine (`http://127.0.0.1:10000`): audit form, live job log, reports with the chart, dashboard. This is what gets hosted online. |
+| `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The console on your own machine (`http://127.0.0.1:10000`): overview, audit any coin, coin pages with the brief and the live chart, watchlist, settings, reports, jobs. This is what gets hosted online. |
 | every audit → `audit/reports/<SYMBOL>_<tf>_<time>_chart.html` | **The chart (v6.2):** the candles the audit looked at with the opportunity drawn on them — entry zone, stop, targets as levels and reward/risk boxes, forming patterns with trigger and invalidation, signal markers, EMAs, pivots — plus the verdict, plan and signals next to it. Opens in any browser, no internet needed. |
 | `docker/smoke_test.sh URL PASSWORD` | Checks a running web app (local, Docker or hosted): login wall, data-source reachability, a full demo audit. |
 
