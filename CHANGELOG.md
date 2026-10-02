@@ -1,5 +1,17 @@
 # Changelog
 
+## v7.1 — 2026-10-02 — TradingView indicator
+
+- `tradingview/coin_audit_library.pine` (Pine Script v6): the whole strategy library as one chart indicator —
+  the 12 rule strategies, the 10 chart-pattern strategies through the same confirmed-pivot engine (K = 3) and
+  the same breakout trigger (volume ≥ 1.2×, break-of-structure, reward:risk ≥ 1.5, retest or close entry, pattern
+  or tight stop), the 5 price-action strategies, the regime classifier (trend / range / transition, 1-year
+  volatility percentile, BTC risk-on from the daily chart via non-repainting HTF requests, liquidity), each
+  strategy's regime requirement, the bot's trade plan with sizing, a strategy board, signal labels and alerts.
+  Strategies the bot ACCEPTED can be marked *validated*; only those count as approved on the chart.
+  What a chart cannot do stays in the bot (validation, gates, meta-labeler, taker flow, funding, order book) —
+  documented in `tradingview/README.md`.
+
 ## v7.0 — 2026-10-01 — a trader's console: the brief, live charts, watchlist, settings
 
 - **Trader brief.** Every audit now opens with what a trader needs, in plain words (`audit/brief.py`): *what to do now*

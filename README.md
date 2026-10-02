@@ -28,6 +28,7 @@ live price. The web app is a console: overview, coin pages, an editable watchlis
 | `AUDIT.bat --review` | Grades past audits **and every logged signal**; builds the live track record that later audits use. |
 
 | `SERVE.bat` · `./linux/serve.sh` · `mac/12 Web app` | The console on your own machine (`http://127.0.0.1:10000`): overview, audit any coin, coin pages with the brief and the live chart, watchlist, settings, reports, jobs. This is what gets hosted online. |
+| `tradingview/coin_audit_library.pine` | **TradingView indicator (v7.1):** all 27 strategies, the pivot/pattern engine, the regime filter, the trade plan and alerts on any Binance chart — see [tradingview/README.md](tradingview/README.md). Mark the strategies the bot ACCEPTED as *validated* and it marks their signals as approved. |
 | every audit → `audit/reports/<SYMBOL>_<tf>_<time>_chart.html` | **The chart (v6.2):** the candles the audit looked at with the opportunity drawn on them — entry zone, stop, targets as levels and reward/risk boxes, forming patterns with trigger and invalidation, signal markers, EMAs, pivots — plus the verdict, plan and signals next to it. Opens in any browser, no internet needed. |
 | `docker/smoke_test.sh URL PASSWORD` | Checks a running web app (local, Docker or hosted): login wall, data-source reachability, a full demo audit. |
 
