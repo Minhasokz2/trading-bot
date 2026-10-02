@@ -1,107 +1,187 @@
 //@version=6
 // ============================================================================================================
-//  Coin Audit · 27-strategy library — TradingView port of audit/strategies.py (+ patterns.py, regime.py)
-//  ----------------------------------------------------------------------------------------------------------
-//  One indicator, every strategy the bot validates, evaluated on candle CLOSE exactly like the bot:
-//    1-12  rule strategies (trend, momentum, pullback, dip, confluence, EMA cross, ICT sweep+FVG, drawdown reclaim)
-//    13-22 chart patterns (W bottom, inverse H&S, range breakout/support, flags, triangles/wedges, rounding/cup,
-//          V-bottom, trendline break, channel bounce) through the same pivot engine (K = 3, confirmed 3 bars later)
-//    23-27 price action (candle at a level, SMC sweep→BOS/FVG→OB, RSI failure swing, squeeze breakout, VWAP reversion)
-//  plus the regime classifier (trend / range / transition, volatility percentile, BTC risk-on from the DAILY chart),
-//  the regime fit each strategy requires, the bot's trade plan (entry zone, stop, T1, T2, size), a strategy board,
-//  labels listing which strategies fired on a bar, and alerts.
+//  COIN AUDIT · 27-STRATEGY LIBRARY · v2
+//  TradingView port of the Coin Audit Bot: audit/strategies.py (27 strategies), audit/patterns.py (pivot engine,
+//  chart patterns, candlesticks, bearish blockers), audit/regime.py (coin regime), audit/market.py (crypto-wide +
+//  macro regime and its gate), audit/checks.py (score and verdict), audit/validation.py (backtest mechanics).
 //
-//  What a chart indicator CANNOT do (the bot does it): walk-forward validation, the 12 gates, Monte Carlo,
-//  overfitting statistics, the meta-labeler, order-book liquidity, taker-flow and funding filters. Mark the
-//  strategies the bot ACCEPTED on this coin as "validated" in the inputs; only those count as APPROVED here.
-//  Higher-timeframe values use the last CLOSED HTF candle (no repainting), as in regime.align().
-//  Research tool, read-only, not financial advice.
+//  ON THE CHART
+//    ▲ green label  a VALIDATED strategy fired on a closed candle, its regime fits and nothing blocks it (APPROVED)
+//    ● grey label   a strategy fired (hover the label: which ones, why approved or blocked, stops, chart stats)
+//    yellow line    nearest armed breakout level (wait for a candle CLOSE above it with volume)
+//    pattern lines  necklines, range boxes, triangle / wedge / channel / trend lines, cup rims (green = broke out)
+//    red lines      bearish patterns: M top, head & shoulders, bear flag, falling triangles / rising wedge,
+//                   rounding top (they block new longs for 3 candles)
+//    plan (right)   entry zone, stop, T1 = 1.5R, T2 = 3R, position size for your risk %
+//    dashboard      verdict 0-100, WHAT TO DO, market, plan, checks, and per strategy: regime fit, state now,
+//                   chart-backtest trades / win % / profit factor / expectancy / status (hover names = how it works)
+//
+//  VALIDATION ON A CHART: every strategy is also paper-traded on the loaded history with the bot's mechanics
+//  (signal on close, fill next open, stops / targets / ROI / trailing / time stops, cooldown and stoploss guard,
+//  fees + slippage both sides). "PASS" = enough trades, profit factor ≥ gate, still profitable at 2x costs, and at
+//  least 3 profitable-on-average trades in the holdout (the last 15 % of the chart). That is a reduced version of the
+//  bot's 12 walk-forward gates; the bot's verdict is the stronger evidence. Full specification of every rule:
+//  tradingview/INDICATOR_PROMPT.md
+//
+//  No repainting: decisions use closed candles; higher timeframes use their last CLOSED candle.
+//  Read-only research tool. It never places orders. Not financial advice.
 // ============================================================================================================
-indicator("Coin Audit · strategy library (27)", "CoinAudit27", overlay = true, max_labels_count = 500,
-          max_lines_count = 100, max_boxes_count = 50, max_bars_back = 500)
+indicator("Coin Audit · 27-strategy library v2", "CoinAudit27", overlay = true, max_labels_count = 500,
+          max_lines_count = 500, max_boxes_count = 200)
 
-// ------------------------------------------------------------------------------------------------- inputs
-G0 = "General"
-btcSym      = input.symbol("BINANCE:BTCUSDT", "BTC symbol (daily risk-on filter)", group = G0)
-useBtc      = input.bool(true, "Apply the BTC risk-on filter where the bot does", group = G0)
-volMultIn   = input.float(1.2, "Breakout volume ≥ × 30-bar average (patterns)", minval = 1.0, step = 0.1, group = G0)
-minRR       = input.float(1.5, "Minimum reward : risk for a pattern signal", minval = 0.5, step = 0.1, group = G0)
-minQv24     = input.float(1000000, "Liquidity: minimum 24h volume in quote ($)", minval = 0, group = G0)
-showLabels  = input.bool(true, "Label bars with the strategies that fired", group = G0)
-showBoard   = input.bool(true, "Show the strategy board", group = G0)
-showPlan    = input.bool(true, "Draw the trade plan (entry zone, stop, targets)", group = G0)
-showEma     = input.bool(true, "Plot EMA 20 / 50 / 200", group = G0)
+// ================================================================================================== INPUTS
+GD = "① Display"
+theme      = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = GD,
+                          tooltip = "Auto follows your chart background colour.")
+boardMode  = input.string("Full", "Dashboard", options = ["Full", "Compact", "Off"], group = GD,
+                          tooltip = "Full: verdict, what to do, market, plan, checks and all 27 strategies with their chart-backtest stats.\nCompact: the header plus only the strategies that are active or validated now.")
+boardPosIn = input.string("Top right", "Dashboard position", options = ["Top right", "Top left", "Top center", "Middle right",
+                          "Middle left", "Bottom right", "Bottom left", "Bottom center"], group = GD)
+boardTxt   = input.string("Small", "Dashboard text", options = ["Tiny", "Small", "Normal"], group = GD)
+labelMode  = input.string("All signals", "Signal labels", options = ["All signals", "Approved only", "Off"], group = GD,
+                          tooltip = "Labels sit under the candle that fired. Hover a label for the full explanation.")
+showPlan   = input.bool(true, "Trade plan", group = GD, inline = "d1")
+showDraw   = input.bool(true, "Pattern lines", group = GD, inline = "d1")
+showEma    = input.bool(true, "EMA 20/50/200", group = GD, inline = "d2")
+showBg     = input.bool(true, "Risk-off background", group = GD, inline = "d2")
+colUp      = input.color(#089981, "Bull", group = GD, inline = "c1")
+colDn      = input.color(#f23645, "Bear", group = GD, inline = "c1")
+colAppr    = input.color(#00c853, "Approved", group = GD, inline = "c1")
+colSetup   = input.color(#ffa726, "Setup", group = GD, inline = "c1")
+colPlan    = input.color(#2962ff, "Plan", group = GD, inline = "c1")
 
-G1 = "Trade plan (audit.trade_plan)"
-planStopAtr = input.float(2.0, "Stop distance (ATR) when no strategy leads", minval = 0.5, step = 0.5, group = G1)
-riskPct     = input.float(1.0, "Risk per trade (% of the account)", minval = 0.1, maxval = 5, step = 0.1, group = G1)
-accountUsd  = input.float(10000, "Account size ($)", minval = 100, step = 100, group = G1)
+GA = "② Signals & approval"
+apprMode   = input.string("Auto: chart-backtest gates", "A strategy is validated by", options = ["Auto: chart-backtest gates",
+                          "Manual: my ✓ list", "Auto or manual"], group = GA,
+                          tooltip = "Only VALIDATED strategies can produce an APPROVED signal.\nAuto: the strategy passed the chart-backtest gates (section ③).\nManual: you marked it 'Validated ✓' in section ⑧ (e.g. the strategies the bot reported as ACCEPTED for this coin).")
+apprCand   = input.bool(false, "Also approve 'partial' strategies (half risk)", group = GA,
+                          tooltip = "The bot also approves CANDIDATE strategies (8+ of its 12 gates) at half the risk. Here 'partial' = profitable on this chart with enough trades, but at least one gate failed.\nOff = only PASS / ✓ strategies can approve.")
+useBtc     = input.bool(true, "BTC risk-on filter (daily)", group = GA,
+                          tooltip = "BTC daily close above its long EMA (200, or 50 without history) and EMA20 > EMA50 = risk-on.\nOn (as in the bot): strategies 01 05 06 07 08 09 11 24 26 need it, trend / pullback / momentum / dip regimes need it, and risk-off caps the verdict at WATCHLIST.\nOff: BTC is ignored everywhere.")
+btcSym     = input.symbol("BINANCE:BTCUSDT", "BTC symbol", group = GA)
+useBear    = input.bool(true, "Bearish patterns block longs (3 candles)", group = GA,
+                          tooltip = "Double/triple top, head & shoulders, bear flag, rising wedge, descending/symmetrical triangle breaking DOWN with volume block new long approvals for 3 candles.")
+useMktGate = input.bool(true, "Market-regime gate", group = GA,
+                          tooltip = "Blocks approvals in a high-volatility event, a BTC selloff, a risk-off rotation, chop (trend modules only), or when the altcoin score < 50 (50-70: only validated strategies). Needs the market layer (⑤).")
+minQv24    = input.float(1000000.0, "Minimum 24h volume ($)", minval = 0, step = 100000, group = GA,
+                          tooltip = "Below this the verdict is forced to AVOID and nothing is approved (the bot's liquidity floor).")
+volMultIn  = input.float(1.2, "Breakout volume ≥ × 30-bar average", minval = 1.0, step = 0.1, group = GA,
+                          tooltip = "Chart patterns 13-21 and the bearish blockers. Bot tests 1.2 / 1.5 (V-bottom 1.3 / 1.8, never below 1.3).")
+minRR      = input.float(1.5, "Pattern reward : risk at least", minval = 0.5, step = 0.1, group = GA,
+                          tooltip = "A pattern breakout only becomes a signal when target − entry ≥ this × (entry − stop). Bot: 1.5.")
 
-G2 = "Rule strategies — parameters (bot grid defaults)"
-adxMin      = input.int(20, "1  EMA/ADX baseline: ADX ≥", minval = 5, group = G2)
-maVotes     = input.int(2, "2  MA ensemble: votes needed (of 3)", minval = 1, maxval = 3, group = G2)
-donN        = input.int(20, "3  Donchian: breakout lookback", minval = 5, group = G2)
-momL        = input.int(90, "4  Vol-managed momentum: lookback", minval = 10, group = G2)
-momMin      = input.float(0.0, "4  Vol-managed momentum: min score", step = 0.1, group = G2)
-pbRsi       = input.int(35, "5  Pullback: RSI below", minval = 10, maxval = 60, group = G2)
-smaOff      = input.float(0.975, "6  SMA offset: close < SMA14 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2)
-smaEwo      = input.float(4.0, "6  SMA offset: EWO above", step = 0.5, group = G2)
-clucMult    = input.float(0.985, "7  BinCluc: close < lower BB20 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2)
-ellOff      = input.float(0.978, "8  Elliot EWO: close < EMA17 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2)
-ellEwo      = input.float(3.0, "8  Elliot EWO: EWO above", step = 0.5, group = G2)
-confK       = input.int(4, "9  Confluence: parts needed (of 6)", minval = 1, maxval = 6, group = G2)
-emaFast     = input.int(21, "10 EMA cross: fast", minval = 2, group = G2)
-emaSlow     = input.int(55, "10 EMA cross: slow", minval = 5, group = G2)
-ictN        = input.int(20, "11 ICT sweep: swing lookback", minval = 5, group = G2)
-ictTpR      = input.float(2.0, "11 ICT sweep: target (R)", minval = 1, step = 0.5, group = G2)
-ddLevel     = input.float(0.85, "12 Deep drawdown: ≥ this fraction below ATH", minval = 0.5, maxval = 0.95, step = 0.05, group = G2)
+GB = "③ Chart backtest gates"
+btCost     = input.float(0.15, "Cost per side (%)", minval = 0, step = 0.01, group = GB,
+                          tooltip = "Fee + slippage charged on the entry AND the exit of every paper trade (bot: 0.10% fee + 0.05% slippage).")
+gMinTr     = input.int(20, "At least N trades", minval = 1, group = GB)
+gMinPf     = input.float(1.2, "Profit factor at least", minval = 0.5, step = 0.05, group = GB)
+gHoldPct   = input.int(15, "Holdout = last N % of the chart", minval = 0, maxval = 60, group = GB,
+                          tooltip = "Trades opened in the last N % of the loaded bars are scored separately (bot: 15 %). The gate needs at least 3 of them and a positive average.")
+gNeedHold  = input.bool(true, "Holdout must be profitable", group = GB)
 
-G3 = "Pattern & price-action parameters"
-patEntry    = input.string("close", "Pattern entry", options = ["close", "retest"], group = G3)
-patStop     = input.string("pattern", "Pattern stop", options = ["pattern", "tight"], group = G3)
-rsZone      = input.float(0.3, "16 Range support: buy zone (fraction of the box height)", minval = 0.1, maxval = 0.5, step = 0.05, group = G3)
-chTouch     = input.float(0.5, "22 Channel bounce: touch distance (ATR)", minval = 0.1, step = 0.1, group = G3)
-calLevel    = input.float(0.5, "23 Candle at level: distance to a pivot low (ATR)", minval = 0.1, step = 0.1, group = G3)
-calTpR      = input.float(1.5, "23 Candle at level: target (R)", minval = 1, step = 0.5, group = G3)
-smcDiv      = input.bool(false, "24 SMC: require RSI divergence at the sweep", group = G3)
-smcTpR      = input.float(2.0, "24 SMC: target (R)", minval = 1, step = 0.5, group = G3)
-fsTpR       = input.float(2.0, "25 RSI failure swing: target (R)", minval = 1, step = 0.5, group = G3)
-sqPct       = input.int(20, "26 Squeeze: BB width in the lowest N % of 120 bars", minval = 5, maxval = 50, group = G3)
-sqVol       = input.float(1.3, "26 Squeeze: breakout volume ≥ ×", minval = 1, step = 0.1, group = G3)
-vwZ         = input.float(2.0, "27 VWAP reversion: z-score below", minval = 1, step = 0.5, group = G3)
+GP = "④ Trade plan & sizing"
+planStopAtr = input.float(2.0, "Stop (ATR) when no strategy leads", minval = 0.5, step = 0.25, group = GP)
+riskPct    = input.float(1.0, "Risk per trade (%)", minval = 0.1, maxval = 5, step = 0.1, group = GP)
+accountUsd = input.float(10000.0, "Account size ($)", minval = 100, step = 100, group = GP)
 
-// --------------------------------------------------- strategy switches: off / show / validated (= bot ACCEPTED)
-G4 = "Strategies — off · show · validated (mark the ones the bot ACCEPTED on this coin)"
-OPTS = "show"
-s01 = input.string(OPTS, "01 Trend baseline (EMA50/200 + ADX)",            options = ["off", "show", "validated"], group = G4)
-s02 = input.string(OPTS, "02 Multi-horizon MA trend ensemble",             options = ["off", "show", "validated"], group = G4)
-s03 = input.string(OPTS, "03 Donchian breakout",                           options = ["off", "show", "validated"], group = G4)
-s04 = input.string(OPTS, "04 Volatility-managed momentum",                 options = ["off", "show", "validated"], group = G4)
-s05 = input.string(OPTS, "05 Trend pullback (NFI modules)",                options = ["off", "show", "validated"], group = G4)
-s06 = input.string(OPTS, "06 SMA offset",                                  options = ["off", "show", "validated"], group = G4)
-s07 = input.string(OPTS, "07 BinCluc (BinHV45 + ClucMay BB)",              options = ["off", "show", "validated"], group = G4)
-s08 = input.string(OPTS, "08 Elliot EWO offset",                           options = ["off", "show", "validated"], group = G4)
-s09 = input.string(OPTS, "09 Confluence score",                            options = ["off", "show", "validated"], group = G4)
-s10 = input.string(OPTS, "10 EMA cross (funding filter n/a on TV)",        options = ["off", "show", "validated"], group = G4)
-s11 = input.string(OPTS, "11 ICT liquidity sweep + FVG",                   options = ["off", "show", "validated"], group = G4)
-s12 = input.string(OPTS, "12 Deep drawdown reclaim",                       options = ["off", "show", "validated"], group = G4)
-s13 = input.string(OPTS, "13 Double / triple bottom (W)",                  options = ["off", "show", "validated"], group = G4)
-s14 = input.string(OPTS, "14 Inverse head & shoulders",                    options = ["off", "show", "validated"], group = G4)
-s15 = input.string(OPTS, "15 Rectangle / range breakout",                  options = ["off", "show", "validated"], group = G4)
-s16 = input.string(OPTS, "16 Range support buy",                           options = ["off", "show", "validated"], group = G4)
-s17 = input.string(OPTS, "17 Bull flag / pennant / high tight flag",       options = ["off", "show", "validated"], group = G4)
-s18 = input.string(OPTS, "18 Triangle / falling wedge breakout",           options = ["off", "show", "validated"], group = G4)
-s19 = input.string(OPTS, "19 Rounding bottom / cup & handle",              options = ["off", "show", "validated"], group = G4)
-s20 = input.string(OPTS, "20 V-bottom reclaim",                            options = ["off", "show", "validated"], group = G4)
-s21 = input.string(OPTS, "21 Downtrend-line break & retest",               options = ["off", "show", "validated"], group = G4)
-s22 = input.string(OPTS, "22 Ascending channel bounce",                    options = ["off", "show", "validated"], group = G4)
-s23 = input.string(OPTS, "23 Bullish candlestick at a key level",          options = ["off", "show", "validated"], group = G4)
-s24 = input.string(OPTS, "24 SMC: sweep → BOS/CHoCH + FVG → OB retest",    options = ["off", "show", "validated"], group = G4)
-s25 = input.string(OPTS, "25 Bullish RSI failure swing",                   options = ["off", "show", "validated"], group = G4)
-s26 = input.string(OPTS, "26 Squeeze (BB compression) breakout",           options = ["off", "show", "validated"], group = G4)
-s27 = input.string(OPTS, "27 VWAP mean reversion",                         options = ["off", "show", "validated"], group = G4)
+GM = "⑤ Market layer (crypto-wide + macro)"
+useMkt     = input.bool(true, "Market layer", group = GM,
+                          tooltip = "TOTAL / TOTAL2 / TOTAL3, BTC and USDT dominance, ETH/BTC, the dollar, VIX and the Nasdaq 100 → the bot's 8 market regimes and the altcoin / BTC eligibility scores (15 % of the verdict).")
+symTot     = input.symbol("CRYPTOCAP:TOTAL", "TOTAL", group = GM, inline = "m1")
+symTot2    = input.symbol("CRYPTOCAP:TOTAL2", "TOTAL2", group = GM, inline = "m1")
+symTot3    = input.symbol("CRYPTOCAP:TOTAL3", "TOTAL3", group = GM, inline = "m2")
+symBtcD    = input.symbol("CRYPTOCAP:BTC.D", "BTC.D", group = GM, inline = "m2")
+symUsdtD   = input.symbol("CRYPTOCAP:USDT.D", "USDT.D", group = GM, inline = "m3")
+symEthBtc  = input.symbol("BINANCE:ETHBTC", "ETH/BTC", group = GM, inline = "m3")
+symDxy     = input.symbol("TVC:DXY", "Dollar", group = GM, inline = "m4")
+symVix     = input.symbol("TVC:VIX", "VIX", group = GM, inline = "m4")
+symNdx     = input.symbol("NASDAQ:NDX", "Nasdaq 100", group = GM, inline = "m5")
 
-// ---------------------------------------------------------------------------- core series (indicators.add_all)
+G2 = "⑥ Rule strategies (bot defaults)"
+adxMin     = input.int(20, "01 EMA/ADX · ADX at least", minval = 5, group = G2, tooltip = "Bot tests 15 / 20 / 25.")
+maVotes    = input.int(2, "02 MA ensemble · votes (of 3)", minval = 1, maxval = 3, group = G2, tooltip = "Bot tests 2 / 3 (and the SMA lengths ×0.5 / ×1 / ×2).")
+donN       = input.int(20, "03 Donchian · breakout bars", minval = 5, group = G2, tooltip = "Bot tests 20 / 55 / 100.")
+momL       = input.int(90, "04 Momentum · lookback", minval = 10, group = G2, inline = "e04")
+momMin     = input.float(0.0, "min score", step = 0.1, group = G2, inline = "e04", tooltip = "Bot tests lookback 30 / 90 / 180 and min score 0 / 0.5.")
+pbRsi      = input.int(35, "05 Pullback · RSI below", minval = 10, maxval = 60, group = G2, tooltip = "Bot tests 30 / 35 / 40.")
+smaOff     = input.float(0.975, "06 SMA offset · close < SMA14 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2, inline = "e06")
+smaEwo     = input.float(4.0, "EWO above", step = 0.5, group = G2, inline = "e06", tooltip = "Bot tests offset 0.96 / 0.975 / 0.99 and EWO 2 / 4.")
+clucMult   = input.float(0.985, "07 BinCluc · close < lower BB20 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2, tooltip = "Bot tests 0.975 / 0.985 / 0.99.")
+ellOff     = input.float(0.978, "08 Elliot · close < EMA17 ×", minval = 0.9, maxval = 1, step = 0.005, group = G2, inline = "e08")
+ellEwo     = input.float(3.0, "EWO above", step = 0.5, group = G2, inline = "e08", tooltip = "Bot tests offset 0.97 / 0.978 / 0.985 and EWO 3 / 5.6.")
+confK      = input.int(4, "09 Confluence · parts (of 6)", minval = 1, maxval = 6, group = G2, tooltip = "Bot tests 4 / 5.")
+emaFast    = input.int(21, "10 EMA cross · fast", minval = 2, group = G2, inline = "e10")
+emaSlow    = input.int(55, "slow", minval = 5, group = G2, inline = "e10", tooltip = "Bot tests fast 12 / 21 and slow 55 / 100.")
+ictN       = input.int(20, "11 ICT · swing bars", minval = 5, group = G2, inline = "e11")
+ictTpR     = input.float(2.0, "target R", minval = 1, step = 0.5, group = G2, inline = "e11", tooltip = "Bot tests swing 20 / 40 bars and target 2R / 3R.")
+ddLevel    = input.float(0.85, "12 Drawdown · below ATH by", minval = 0.5, maxval = 0.95, step = 0.05, group = G2, inline = "e12")
+ddTp       = input.float(1.0, "target +", minval = 0.2, step = 0.1, group = G2, inline = "e12", tooltip = "Bot tests 0.80 / 0.85 / 0.90 under the ATH and a target of +50 % / +100 %.")
+
+G3 = "⑦ Patterns & price action"
+patEntry   = input.string("close", "Pattern entry", options = ["close", "retest"], group = G3, inline = "p1")
+patStop    = input.string("pattern", "stop", options = ["pattern", "tight"], group = G3, inline = "p1",
+                          tooltip = "close = buy the breakout close · retest = limit 0.1 ATR above the broken level for 5 candles.\npattern = stop beyond the pattern extreme · tight = 1.5 ATR under the level (whichever is closer).\nThe bot tests both of each.")
+rsZone     = input.float(0.3, "16 Range support · buy zone (of height)", minval = 0.1, maxval = 0.5, step = 0.05, group = G3, tooltip = "Bot tests 0.2 / 0.3.")
+chTouch    = input.float(0.6, "22 Channel · touch within (ATR)", minval = 0.1, step = 0.1, group = G3, tooltip = "Bot tests 0.3 / 0.6.")
+calLevel   = input.float(0.3, "23 Candle at level · within (ATR)", minval = 0.1, step = 0.1, group = G3, inline = "p23")
+calTpR     = input.float(1.5, "target R", minval = 1, step = 0.5, group = G3, inline = "p23", tooltip = "Bot tests 0.3 / 0.6 ATR and target 1.5R / 2R.")
+smcDiv     = input.bool(false, "24 SMC · RSI divergence", group = G3, inline = "p24")
+smcTpR     = input.float(2.0, "target R", minval = 1, step = 0.5, group = G3, inline = "p24", tooltip = "Bot tests with and without the divergence, target 2R / 3R.")
+fsTpR      = input.float(1.5, "25 RSI failure swing · target R", minval = 1, step = 0.5, group = G3, tooltip = "Bot tests 1.5R / 2.5R.")
+sqPct      = input.int(20, "26 Squeeze · BB width lowest %", minval = 5, maxval = 50, group = G3, inline = "p26")
+sqVol      = input.float(1.3, "volume ×", minval = 1, step = 0.1, group = G3, inline = "p26", tooltip = "Bot tests the lowest 10 / 20 % and volume 1.3 / 1.8×.")
+vwZ        = input.float(2.0, "27 VWAP reversion · z below", minval = 1, step = 0.5, group = G3, tooltip = "Bot tests 2 / 2.5.")
+
+G4 = "⑧ Strategies · Off / On / Validated ✓"
+O3 = "On"
+s01 = input.string(O3, "01 Trend baseline EMA50/200 + ADX",   options = ["Off", "On", "Validated ✓"], group = G4)
+s02 = input.string(O3, "02 Multi-horizon MA ensemble",        options = ["Off", "On", "Validated ✓"], group = G4)
+s03 = input.string(O3, "03 Donchian breakout",                options = ["Off", "On", "Validated ✓"], group = G4)
+s04 = input.string(O3, "04 Volatility-managed momentum",      options = ["Off", "On", "Validated ✓"], group = G4)
+s05 = input.string(O3, "05 Trend pullback (NFI modules)",     options = ["Off", "On", "Validated ✓"], group = G4)
+s06 = input.string(O3, "06 SMA offset",                       options = ["Off", "On", "Validated ✓"], group = G4)
+s07 = input.string(O3, "07 BinCluc Bollinger dip",            options = ["Off", "On", "Validated ✓"], group = G4)
+s08 = input.string(O3, "08 Elliot EWO offset",                options = ["Off", "On", "Validated ✓"], group = G4)
+s09 = input.string(O3, "09 Confluence score",                 options = ["Off", "On", "Validated ✓"], group = G4)
+s10 = input.string(O3, "10 EMA cross",                        options = ["Off", "On", "Validated ✓"], group = G4)
+s11 = input.string(O3, "11 ICT liquidity sweep + FVG",        options = ["Off", "On", "Validated ✓"], group = G4)
+s12 = input.string(O3, "12 Deep drawdown reclaim",            options = ["Off", "On", "Validated ✓"], group = G4)
+s13 = input.string(O3, "13 Double / triple bottom",           options = ["Off", "On", "Validated ✓"], group = G4)
+s14 = input.string(O3, "14 Inverse head & shoulders",         options = ["Off", "On", "Validated ✓"], group = G4)
+s15 = input.string(O3, "15 Range breakout",                   options = ["Off", "On", "Validated ✓"], group = G4)
+s16 = input.string(O3, "16 Range support",                    options = ["Off", "On", "Validated ✓"], group = G4)
+s17 = input.string(O3, "17 Bull flag / pennant",              options = ["Off", "On", "Validated ✓"], group = G4)
+s18 = input.string(O3, "18 Triangle / falling wedge",         options = ["Off", "On", "Validated ✓"], group = G4)
+s19 = input.string(O3, "19 Rounding bottom / cup",            options = ["Off", "On", "Validated ✓"], group = G4)
+s20 = input.string(O3, "20 V-bottom reclaim",                 options = ["Off", "On", "Validated ✓"], group = G4)
+s21 = input.string(O3, "21 Trendline break",                  options = ["Off", "On", "Validated ✓"], group = G4)
+s22 = input.string(O3, "22 Channel bounce",                   options = ["Off", "On", "Validated ✓"], group = G4)
+s23 = input.string(O3, "23 Candle at a key level",            options = ["Off", "On", "Validated ✓"], group = G4)
+s24 = input.string(O3, "24 SMC sweep → BOS → order block",    options = ["Off", "On", "Validated ✓"], group = G4)
+s25 = input.string(O3, "25 RSI failure swing",                options = ["Off", "On", "Validated ✓"], group = G4)
+s26 = input.string(O3, "26 Squeeze breakout",                 options = ["Off", "On", "Validated ✓"], group = G4)
+s27 = input.string(O3, "27 VWAP reversion",                   options = ["Off", "On", "Validated ✓"], group = G4)
+
+// ================================================================================================== THEME
+bgLum   = color.r(chart.bg_color) * 0.299 + color.g(chart.bg_color) * 0.587 + color.b(chart.bg_color) * 0.114
+dark    = theme == "Dark" or (theme == "Auto" and bgLum < 128)
+C_PANEL = dark ? color.new(#131722, 4) : color.new(#ffffff, 2)
+C_HEAD  = dark ? #1e222d : #eef1f6
+C_ROWA  = dark ? color.new(#1e222d, 55) : color.new(#f5f7fa, 0)
+C_TXT   = dark ? #d1d4dc : #131722
+C_MUTE  = dark ? #787b86 : #6a6d78
+C_LINE  = dark ? #2a2e39 : #d1d4dc
+C_NEUT  = dark ? #9598a1 : #6a6d78
+TXT     = boardTxt == "Tiny" ? size.tiny : boardTxt == "Normal" ? size.normal : size.small
+POS     = boardPosIn == "Top left" ? position.top_left : boardPosIn == "Top center" ? position.top_center :
+          boardPosIn == "Middle right" ? position.middle_right : boardPosIn == "Middle left" ? position.middle_left :
+          boardPosIn == "Bottom right" ? position.bottom_right : boardPosIn == "Bottom left" ? position.bottom_left :
+          boardPosIn == "Bottom center" ? position.bottom_center : position.top_right
+f_tint(color c) => color.new(c, dark ? 70 : 82)
+f_scoreCol(float s) => s >= 65 ? colUp : s >= 40 ? colSetup : colDn          // checks: pass ≥ 65, warn ≥ 40, fail
+f_verdictCol(string v) => v == "FAVORABLE" ? colUp : v == "WATCHLIST" ? colSetup : v == "AVOID" ? colDn : C_NEUT
+
+// ============================================================================== CORE SERIES (indicators.add_all)
 ema20  = ta.ema(close, 20)
 ema50  = ta.ema(close, 50)
 ema200 = ta.ema(close, 200)
@@ -111,66 +191,246 @@ atrPct = atr / close
 [diPlus, diMinus, adx] = ta.dmi(14, 14)
 [macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
 [bbMid, bbUp, bbLo] = ta.bb(close, 20, 2)
-bbw      = (bbUp - bbLo) / bbMid                                 // pandas-ta BBB / 100
+bbw      = (bbUp - bbLo) / bbMid                                  // pandas-ta BBB / 100
 volSma30 = ta.sma(volume, 30)
-volRatio = volSma30 > 0 ? volume / volSma30 : na                 // quote volume is not on TV: base volume ratio
+volRatio = volSma30 > 0 ? volume / volSma30 : na                  // base volume (quote volume is not on TradingView)
 sma20    = ta.sma(close, 20)
-ewo      = (ta.ema(close, 5) - ta.ema(close, 35)) / close * 100   // Elliott wave oscillator (%)
-hlc3v    = hlc3
-
+ewo      = (ta.ema(close, 5) - ta.ema(close, 35)) / close * 100    // Elliott wave oscillator, %
+qv       = volume * hlc3                                           // ≈ quote volume per candle
 tfSec      = timeframe.in_seconds()
 barsPerDay = math.max(1, math.round(86400.0 / tfSec))
-yrBars     = math.min(math.round(31536000.0 / tfSec), 1500)       // trailing year (capped for speed)
-qv24       = math.sum(volume * hlc3v, barsPerDay)                 // ≈ 24h quote volume
+yrBars     = math.min(math.round(31536000.0 / tfSec), 1500)        // trailing year, capped for speed
+qv24       = math.sum(qv, barsPerDay)                              // ≈ 24h quote volume
 liquidityOk = qv24 >= minQv24
+isBtc      = syminfo.basecurrency == "BTC"
+max_bars_back(high, 500)
+max_bars_back(low, 500)
+max_bars_back(close, 500)
+max_bars_back(open, 500)
+max_bars_back(atr, 500)
+max_bars_back(atrPct, 1500)                             // ta.percentrank over up to 1500 candles
+max_bars_back(rsi, 500)
+max_bars_back(ema50, 500)
+max_bars_back(bbw, 500)
 
-// ------------------------------------------------------------- higher-timeframe context (last CLOSED candle only)
-htfStr   = tfSec <= 900 ? "60" : tfSec <= 3600 ? "240" : tfSec <= 14400 ? "D" : tfSec <= 86400 ? "W" : "M"
-tfDaily  = tfSec >= 86400
+// ===================================================== MULTI-TIMEFRAME CONTEXT (last CLOSED higher-TF candle)
+// A higher timeframe is read one candle back with lookahead_on (= its last closed candle, never the forming one);
+// the same or a lower timeframe is read as-is. Exactly what regime.align() does in the bot.
+off4h = tfSec < 14400 ? 1 : 0
+off1h = tfSec < 3600 ? 1 : 0
+offD  = tfSec < 86400 ? 1 : 0
+la4h  = tfSec < 14400 ? barmerge.lookahead_on : barmerge.lookahead_off
+la1h  = tfSec < 3600 ? barmerge.lookahead_on : barmerge.lookahead_off
+laD   = tfSec < 86400 ? barmerge.lookahead_on : barmerge.lookahead_off
+htfStr = tfSec <= 900 ? "60" : tfSec <= 3600 ? "240" : tfSec <= 14400 ? "D" : tfSec <= 86400 ? "W" : "M"
+
+// checks._tf_trend: +25 close > EMA50 · +25 EMA50 > long EMA · +20 EMA50 rising (5 bars) · +30 ADX ≥ 20 with +DI (+12 if ADX < 20)
+f_tfPts(simple int off) =>
+    e50 = ta.ema(close, 50)
+    e200 = ta.ema(close, 200)
+    lng = na(e200) ? e50 : e200
+    [dp, dm, ax] = ta.dmi(14, 14)
+    pts = (close > e50 ? 25.0 : 0.0) + (e50 > lng ? 25.0 : 0.0) + (e50 > e50[5] ? 20.0 : 0.0) + (ax >= 20 and dp > dm ? 30.0 : ax < 20 ? 12.0 : 0.0)
+    pts[off]
+// the coin's daily candles: RSI, ATR %, 90-day max drawdown, 30/90-day return, 7d/30d volume, 7-day change
+f_dCoin(simple int off) =>
+    r = ta.rsi(close, 14)
+    ap = ta.atr(14) / close
+    float pk = na
+    float mdd = 0.0
+    for i = 89 to 0
+        c = close[i]
+        if not na(c)
+            pk := na(pk) ? c : math.max(pk, c)
+            mdd := math.min(mdd, c / pk - 1)
+    n90 = math.min(90, bar_index)
+    r30 = close / close[30] - 1
+    r90 = close / close[n90] - 1
+    q = volume * hlc3
+    vr = ta.sma(q, 7) / ta.sma(q, 30)
+    p7 = close / close[7] - 1
+    [r[off], ap[off], mdd[off], r30[off], r90[off], vr[off], p7[off]]
+// BTC daily: risk-on (close > long EMA and EMA20 > EMA50), returns, 7-day change, break of the 30-day low close
+f_dBtc(simple int off) =>
+    e20 = ta.ema(close, 20)
+    e50 = ta.ema(close, 50)
+    e200 = ta.ema(close, 200)
+    lng = na(e200) ? e50 : e200
+    on = close > lng and e20 > e50 ? 1.0 : 0.0
+    n90 = math.min(90, bar_index)
+    r30 = close / close[30] - 1
+    r90 = close / close[n90] - 1
+    c7 = close / close[7] - 1
+    sup = close < ta.lowest(close, 30)[1] ? 1.0 : 0.0
+    [on[off], r30[off], r90[off], c7[off], sup[off]]
+
 [htfClose, htfEma200] = request.security(syminfo.tickerid, htfStr, [close[1], ta.ema(close, 200)[1]], lookahead = barmerge.lookahead_on)
+[dRsi, dAtrPct, dMdd90, dRet30, dRet90, dVr7, dP7] = request.security(syminfo.tickerid, "D", f_dCoin(offD), lookahead = laD)
+[bOnF, bRet30, bRet90, bChg7, bSup30] = request.security(btcSym, "D", f_dBtc(offD), lookahead = laD)
+btcClose = request.security(btcSym, timeframe.period, close)
+ptsD = request.security(syminfo.tickerid, "D", f_tfPts(offD), lookahead = laD)
+pts4 = request.security(syminfo.tickerid, "240", f_tfPts(off4h), lookahead = la4h)
+pts1 = request.security(syminfo.tickerid, "60", f_tfPts(off1h), lookahead = la1h)
+btcOnRaw = na(bOnF) or bOnF == 1.0                                // missing BTC data counts as risk-on (as in the bot)
+btcOn    = not useBtc or btcOnRaw
 
-f_btcRiskPrev() =>                                            // checks.relative_strength: BTC daily risk-on
-    e20 = ta.ema(close, 20)
-    e50 = ta.ema(close, 50)
+// =================================================================================== COIN REGIME (regime.classify)
+er      = math.abs(close - close[20]) / math.max(math.sum(math.abs(close - close[1]), 20), 1e-12)   // Kaufman efficiency
+trendSt = adx >= 22 or er >= 0.35 ? "trend" : adx < 18 and er < 0.25 ? "range" : "transition"
+dirUp   = close > ema50
+volRank = ta.percentrank(atrPct, yrBars) / 100.0
+volSt   = volRank >= 0.8 ? "high" : volRank <= 0.2 ? "low" : "normal"
+highVol = volSt == "high"
+regTrend = liquidityOk and trendSt != "range" and dirUp and btcOn            // strategies that need "trend"
+regPull  = liquidityOk and btcOn and not highVol                            // "trend_pullback" / "momentum" / "dip"
+regRange = liquidityOk and trendSt == "range" and not highVol               // "range"
+regAny   = liquidityOk                                                      // "any"
+
+// ===================================================================== MARKET LAYER (market.classify + market.gate)
+f_btc4h(simple int off) =>                              // BTC 4h: above EMA200 with bullish pivot structure, event volatility, chop, reclaim
     e200 = ta.ema(close, 200)
-    lng = na(e200) ? e50 : e200
-    v = close > lng and e20 > e50 ? 1.0 : 0.0
-    v[1]
-f_btcRiskNow() =>
-    e20 = ta.ema(close, 20)
+    ph = ta.pivothigh(high, 3, 3)
+    pl = ta.pivotlow(low, 3, 3)
+    h0 = ta.valuewhen(not na(ph), ph, 0)
+    h1 = ta.valuewhen(not na(ph), ph, 1)
+    l0 = ta.valuewhen(not na(pl), pl, 0)
+    l1 = ta.valuewhen(not na(pl), pl, 1)
+    bull = close > e200 and h0 > h1 and l0 > l1 ? 1.0 : 0.0
+    ap = ta.atr(14) / close
+    hv = ap >= ta.percentile_nearest_rank(ap, 500, 95) or math.abs(close / close[6] - 1) > 0.08 ? 1.0 : 0.0
+    [dp, dm, ax] = ta.dmi(14, 14)
+    adxLow = ax < 18 ? 1.0 : 0.0
+    below = math.sum(close < e200 ? 1.0 : 0.0, 30)            // stateful calls stay outside and / or (v6 is lazy)
+    recl = ta.highest(close - e200, 30) > 0 and below[30] / 30 > 0.5 ? 1.0 : 0.0
+    [bull[off], hv[off], adxLow[off], recl[off]]
+f_ab200(simple int off) =>
+    v = close > ta.ema(close, 200) ? 1.0 : 0.0
+    v[off]
+f_slDn(simple int off) =>                               // EMA20 below its value 5 candles ago
+    e = ta.ema(close, 20)
+    v = e < e[5] ? 1.0 : 0.0
+    v[off]
+f_t34h(simple int off) =>                               // TOTAL3 4h: above EMA200; new high over the prior 50 candles on 1.2x volume
+    ab = close > ta.ema(close, 200) ? 1.0 : 0.0
+    hi6 = ta.highest(close, 6)
+    hi50 = ta.highest(close, 50)
+    v6 = ta.sma(volume, 6)
+    v54 = ta.sma(volume, 54)
+    brk = hi6 > hi50[6] and v6 > 1.2 * v54[6] ? 1.0 : 0.0
+    [ab[off], brk[off]]
+f_c7sup(simple int off) =>                              // 7-candle change; close under the prior 30-candle low close
+    c7 = close / close[7] - 1
+    sup = close < ta.lowest(close, 30)[1] ? 1.0 : 0.0
+    [c7[off], sup[off]]
+f_usdtD(simple int off) =>                              // EMA20 falling; close above the prior 30-candle high close
+    e = ta.ema(close, 20)
+    dn = e < e[5] ? 1.0 : 0.0
+    up30 = close > ta.highest(close, 30)[1] ? 1.0 : 0.0
+    [dn[off], up30[off]]
+f_bull50(simple int off) =>                             // close above a rising EMA50
+    e = ta.ema(close, 50)
+    v = close > e and e > e[5] ? 1.0 : 0.0
+    v[off]
+f_dxy(simple int off) =>                                // market.trend(s, 50), broke_higher(60), 20-candle change
     e50 = ta.ema(close, 50)
-    e200 = ta.ema(close, 200)
-    lng = na(e200) ? e50 : e200
-    close > lng and e20 > e50 ? 1.0 : 0.0
-btcPrev  = request.security(btcSym, "D", f_btcRiskPrev(), lookahead = barmerge.lookahead_on)
-btcNow   = request.security(btcSym, "D", f_btcRiskNow())
-btcOnRaw = (tfDaily ? btcNow : btcPrev) == 1.0
-btcOn    = not useBtc or btcOnRaw                             // "btc ok" for strategies that require it
-btcClose = request.security(btcSym, timeframe.period, close) // same timeframe: relative momentum
-isBtc    = str.contains(syminfo.ticker, "BTC") and not str.contains(syminfo.ticker, "WBTC")
+    e20 = ta.ema(close, 20)
+    ab = close > e50 ? 1.0 : 0.0
+    dn = e20 < e20[5] ? 1.0 : 0.0
+    hi60 = close > ta.highest(close, 60)[1] ? 1.0 : 0.0
+    c20 = close / close[20] - 1
+    [ab[off], dn[off], hi60[off], c20[off]]
+f_ab50(simple int off) =>
+    v = close > ta.ema(close, 50) ? 1.0 : 0.0
+    v[off]
+f_cl(simple int off) =>
+    close[off]
 
-// ------------------------------------------------------------------------------------- regime (regime.classify)
-er        = math.abs(close - close[20]) / math.max(math.sum(math.abs(close - close[1]), 20), 1e-12)
-trendSt   = adx >= 22 or er >= 0.35 ? "trend" : adx < 18 and er < 0.25 ? "range" : "transition"
-dirUp     = close > ema50
-volRank   = ta.percentrank(atrPct, yrBars) / 100.0
-volSt     = volRank >= 0.8 ? "high" : volRank <= 0.2 ? "low" : "normal"
-highVol   = volSt == "high"
-regTrend  = liquidityOk and trendSt != "range" and dirUp and btcOnRaw          // "trend"
-regPull   = liquidityOk and btcOnRaw and not highVol                           // trend_pullback / momentum / dip
-regRange  = liquidityOk and trendSt == "range" and not highVol                 // "range"
-regAny    = liquidityOk
+[mBtcBull, mHv, mAdxLow, mRecl] = request.security(btcSym, "240", f_btc4h(off4h), lookahead = la4h)
+mTotAb  = request.security(symTot, "240", f_ab200(off4h), lookahead = la4h, ignore_invalid_symbol = true)
+mTot2Ab = request.security(symTot2, "240", f_ab200(off4h), lookahead = la4h, ignore_invalid_symbol = true)
+[mT3Ab, mT3Brk] = request.security(symTot3, "240", f_t34h(off4h), lookahead = la4h, ignore_invalid_symbol = true)
+mBdDn4  = request.security(symBtcD, "240", f_slDn(off4h), lookahead = la4h, ignore_invalid_symbol = true)
+mUdDn4  = request.security(symUsdtD, "240", f_slDn(off4h), lookahead = la4h, ignore_invalid_symbol = true)
+[mTotC7, mTotSup] = request.security(symTot, "D", f_c7sup(offD), lookahead = laD, ignore_invalid_symbol = true)
+[mT3C7, mT3Sup] = request.security(symTot3, "D", f_c7sup(offD), lookahead = laD, ignore_invalid_symbol = true)
+mBdDnD  = request.security(symBtcD, "D", f_slDn(offD), lookahead = laD, ignore_invalid_symbol = true)
+[mUdDnD, mUdUp30] = request.security(symUsdtD, "D", f_usdtD(offD), lookahead = laD, ignore_invalid_symbol = true)
+mEthBull = request.security(symEthBtc, "D", f_bull50(offD), lookahead = laD, ignore_invalid_symbol = true)
+[mDxyAb, mDxyDn, mDxyHi60, mDxyC20] = request.security(symDxy, "D", f_dxy(offD), lookahead = laD, ignore_invalid_symbol = true)
+mVix    = request.security(symVix, "D", f_cl(offD), lookahead = laD, ignore_invalid_symbol = true)
+mNdxAb  = request.security(symNdx, "D", f_ab50(offD), lookahead = laD, ignore_invalid_symbol = true)
+mCoinBtc = request.security("BINANCE:" + syminfo.basecurrency + "BTC", "D", f_bull50(offD), lookahead = laD, ignore_invalid_symbol = true)
 
-// ------------------------------------------------------------------------------------------- pivots (K = 3)
+mAvail    = useMkt and not na(mTotAb)
+btc7      = nz(bChg7) * 100
+tot7      = nz(mTotC7) * 100
+t37       = nz(mT3C7) * 100
+btcBull4  = mBtcBull == 1
+btcdFall  = mBdDn4 == 1 and mBdDnD == 1
+btcdRise  = mBdDn4 == 0 and mBdDnD == 0
+usdtFall  = mUdDn4 == 1 and mUdDnD == 1
+usdtRise  = mUdDn4 == 0 and mUdDnD == 0
+t3Above   = mT3Ab == 1
+dxyOk     = mDxyAb == 0 or mDxyDn == 1
+dxyBreak  = mDxyHi60 == 1 and nz(mDxyC20) * 100 > 2
+liqHigh   = qv24 >= 20000000
+btcSup    = bSup30 == 1
+t3Sup     = mT3Sup == 1
+usdtUp    = mUdUp30 == 1
+coinBtcOk = mCoinBtc == 1 and not isBtc
+altScore  = math.max(0.0, math.min(100.0, (btcBull4 ? 15.0 : 0) + (mTot2Ab == 1 ? 10 : 0) + (t3Above ? 15 : 0) +
+     (mT3Brk == 1 ? 10 : 0) + (btcdFall ? 10 : 0) + (usdtFall ? 10 : 0) + (mEthBull == 1 ? 10 : 0) + (dxyOk ? 5 : 0) +
+     (coinBtcOk ? 10 : 0) + (liqHigh ? 5 : 0) - (btcSup ? 25 : 0) - (t3Sup ? 20 : 0) - (usdtUp ? 15 : 0) - (dxyBreak ? 10 : 0)))
+btcScoreM = math.max(0.0, math.min(100.0, (btcBull4 ? 30.0 : 0) + (mTotAb == 1 ? 15 : 0) + (usdtFall ? 20 : 0) + (dxyOk ? 10 : 0) +
+     (mVix < 20 ? 10 : 0) + (mNdxAb == 1 ? 10 : 0) + (liqHigh ? 5 : 0) - (btcSup ? 25 : 0) - (usdtUp ? 15 : 0) - (dxyBreak ? 10 : 0)))
+hvEvent   = mHv == 1 or mVix > 35
+chop      = mAdxLow == 1 and math.abs(btc7) < 3
+mRegime   = not mAvail ? "n/a" : hvEvent ? "High-volatility event" : btc7 < -10 and tot7 < -10 ? "BTC selloff" :
+     usdtRise and tot7 < 0 ? "Risk-off / stablecoin rotation" : btcdFall and usdtFall and t37 > btc7 + 3 ? "Altcoin rotation" :
+     btcBull4 and t3Above and not btcdRise and usdtFall ? "Broad risk-on" : btcBull4 and btcdRise and t37 < btc7 ? "BTC-led rally" :
+     mRecl == 1 and not t3Above ? "BTC recovery, alts weak" : chop ? "Range / chop" : "Mixed"
+mBehave   = mRegime == "High-volatility event" ? "Pause automatic entries; every signal needs manual approval." :
+     mRegime == "BTC selloff" ? "Disable altcoin longs; watch liquidation and volatility." :
+     mRegime == "Risk-off / stablecoin rotation" ? "BTC longs only, and only fully validated ones." :
+     mRegime == "Altcoin rotation" ? "Selective ETH / alt longs, ranked by relative strength." :
+     mRegime == "Broad risk-on" ? "BTC, ETH and high-quality alt long setups are enabled." :
+     mRegime == "BTC-led rally" ? "Prefer BTC; be selective with alts." :
+     mRegime == "BTC recovery, alts weak" ? "Trade BTC carefully; wait for alt confirmation." :
+     mRegime == "Range / chop" ? "Range, dip and mean-reversion modules only; no breakout / trend entries." :
+     mRegime == "Mixed" ? "No dominant regime; rely on per-strategy validation and the eligibility score." : "Market layer off or no data."
+mktScore  = isBtc ? btcScoreM : altScore
+f_item(bool ok, int pts, string txt) => ok ? (pts > 0 ? "+" : "") + str.tostring(pts) + "  " + txt + "\n" : ""
+mItems    = isBtc ? f_item(btcBull4, 30, "BTC above 4H EMA200, bullish structure") + f_item(mTotAb == 1, 15, "TOTAL above 4H EMA200") +
+     f_item(usdtFall, 20, "USDT.D falling on 4H and 1D") + f_item(dxyOk, 10, "Dollar falling or below trend") +
+     f_item(mVix < 20, 10, "VIX below 20") + f_item(mNdxAb == 1, 10, "Nasdaq 100 above trend") + f_item(liqHigh, 5, "High liquidity") +
+     f_item(btcSup, -25, "BTC broke its 30-day low") + f_item(usdtUp, -15, "USDT.D broke higher") + f_item(dxyBreak, -10, "Dollar broke higher strongly") :
+     f_item(btcBull4, 15, "BTC above 4H EMA200, bullish structure") + f_item(mTot2Ab == 1, 10, "TOTAL2 above 4H EMA200") +
+     f_item(t3Above, 15, "TOTAL3 above 4H EMA200") + f_item(mT3Brk == 1, 10, "TOTAL3 broke resistance on volume") +
+     f_item(btcdFall, 10, "BTC.D falling on 4H and 1D") + f_item(usdtFall, 10, "USDT.D falling on 4H and 1D") +
+     f_item(mEthBull == 1, 10, "ETH/BTC bullish") + f_item(dxyOk, 5, "Dollar falling or below trend") +
+     f_item(coinBtcOk, 10, "Coin/BTC pair bullish") + f_item(liqHigh, 5, "High liquidity") + f_item(btcSup, -25, "BTC broke its 30-day low") +
+     f_item(t3Sup, -20, "TOTAL3 broke support") + f_item(usdtUp, -15, "USDT.D broke higher") + f_item(dxyBreak, -10, "Dollar broke higher strongly")
+
+// ====================================================================== PIVOTS (patterns.pivots, K = 3 candles)
+// A pivot is the single highest high / lowest low of a 7-candle window (ties do not count). Known 3 candles later.
 K = 3
 var int[]   phI = array.new<int>()
 var float[] phV = array.new<float>()
 var int[]   plI = array.new<int>()
 var float[] plV = array.new<float>()
-phNew = ta.pivothigh(high, K, K)
-plNew = ta.pivotlow(low, K, K)
-newPH = not na(phNew)
-newPL = not na(plNew)
+f_isPivot(bool isHigh) =>                                     // the candle K bars ago is the UNIQUE extreme of 2K+1
+    bool ok = bar_index >= 2 * K
+    if ok
+        c0 = isHigh ? high[K] : low[K]
+        for j = 0 to 2 * K
+            if j != K and (isHigh ? high[j] >= c0 : low[j] <= c0)
+                ok := false
+                break
+    ok
+newPH = f_isPivot(true)
+newPL = f_isPivot(false)
+phNew = high[K]
+plNew = low[K]
 if newPH
     array.push(phI, bar_index - K)
     array.push(phV, phNew)
@@ -189,30 +449,27 @@ lastPhI = nPH > 0 ? array.get(phI, nPH - 1) : -1
 lastPhV = nPH > 0 ? array.get(phV, nPH - 1) : na
 lastPlI = nPL > 0 ? array.get(plI, nPL - 1) : -1
 lastPlV = nPL > 0 ? array.get(plV, nPL - 1) : na
-
-// market structure (patterns.structure): last two confirmed highs and lows
+// market structure: two higher highs and higher lows = bullish, two lower = bearish
 structure = nPH >= 2 and nPL >= 2 ?
      (array.get(phV, nPH - 1) > array.get(phV, nPH - 2) and array.get(plV, nPL - 1) > array.get(plV, nPL - 2) ? "bullish" :
       array.get(phV, nPH - 1) < array.get(phV, nPH - 2) and array.get(plV, nPL - 1) < array.get(plV, nPL - 2) ? "bearish" : "mixed") : "unknown"
 
 // ------------------------------------------------------------------------------------------------- helpers
-f_off(i) => math.min(math.max(bar_index - i, 0), 480)          // safe history offset for a bar index
-f_tol(i) => math.min(math.max(0.5 * atrPct[f_off(i)], 0.005), 0.015)  // patterns.tolerance
-f_hh(a, b) =>                                                  // highest high over bar indices a..b
+f_off(int i) => math.min(math.max(bar_index - i, 0), 480)              // history offset of a bar index (capped)
+f_tol(int i) => math.min(math.max(0.5 * atrPct[f_off(i)], 0.005), 0.015)   // equal-level tolerance 0.5 %-1.5 %
+f_hh(int a, int b) =>
     float m = na
     if b >= a
         for i = a to b
-            v = high[f_off(i)]
-            m := na(m) ? v : math.max(m, v)
+            m := na(m) ? high[f_off(i)] : math.max(m, high[f_off(i)])
     m
-f_ll(a, b) =>
+f_ll(int a, int b) =>
     float m = na
     if b >= a
         for i = a to b
-            v = low[f_off(i)]
-            m := na(m) ? v : math.min(m, v)
+            m := na(m) ? low[f_off(i)] : math.min(m, low[f_off(i)])
     m
-f_closeOutside(a, b, lo_, hi_) =>                              // any close outside [lo_, hi_] over a..b
+f_closeOutside(int a, int b, float lo_, float hi_) =>
     bool out = false
     if b >= a
         for i = a to b
@@ -221,23 +478,33 @@ f_closeOutside(a, b, lo_, hi_) =>                              // any close outs
                 out := true
                 break
     out
-f_priorDown(i) =>                                              // patterns.prior_downtrend (30 bars, 3 ATR)
+f_priorDown(int i) =>                                                  // ≥ 3 ATR off the 30-candle high, under EMA50
     o = f_off(i)
-    pk = f_hh(math.max(i - 30, bar_index - 480), i)
-    (pk - low[o]) >= 3 * atr[o] and close[o] <= ema50[o]
-f_maxPhBetween(a, b) =>                                        // highest confirmed pivot high strictly inside (a, b)
+    (f_hh(math.max(i - 30, bar_index - 480), i) - low[o]) >= 3 * atr[o] and close[o] <= ema50[o]
+f_priorUp(int i) =>                                                    // ≥ 3 ATR above the 30-candle low, over EMA50
+    o = f_off(i)
+    (high[o] - f_ll(math.max(i - 30, bar_index - 480), i)) >= 3 * atr[o] and close[o] >= ema50[o]
+f_maxPhBetween(int a, int b) =>                                        // highest pivot high strictly inside (a, b)
     int bi = -1
     float bv = na
     if nPH > 0
         for j = 0 to nPH - 1
             idx = array.get(phI, j)
-            if idx > a and idx < b
-                v = array.get(phV, j)
-                if na(bv) or v > bv
-                    bi := idx
-                    bv := v
+            if idx > a and idx < b and (na(bv) or array.get(phV, j) > bv)
+                bi := idx
+                bv := array.get(phV, j)
     [bi, bv]
-f_lastPlBetween(a, b) =>                                       // newest confirmed pivot low strictly inside (a, b)
+f_minPlBetween(int a, int b) =>                                        // lowest pivot low strictly inside (a, b)
+    int bi = -1
+    float bv = na
+    if nPL > 0
+        for j = 0 to nPL - 1
+            idx = array.get(plI, j)
+            if idx > a and idx < b and (na(bv) or array.get(plV, j) < bv)
+                bi := idx
+                bv := array.get(plV, j)
+    [bi, bv]
+f_lastPlBetween(int a, int b) =>                                       // newest pivot low strictly inside (a, b)
     int bi = -1
     float bv = na
     if nPL > 0
@@ -247,30 +514,29 @@ f_lastPlBetween(a, b) =>                                       // newest confirm
                 bi := idx
                 bv := array.get(plV, j)
     [bi, bv]
-f_fit3(xs, ys) =>                                              // least-squares line through 2-3 points: slope, icpt, max resid
+f_fit3(float[] xs, float[] ys) =>                                      // least squares: slope, intercept, max residual
     n = array.size(xs)
     float sx = 0.0
     float sy = 0.0
     float sxx = 0.0
     float sxy = 0.0
     for j = 0 to n - 1
-        x = array.get(xs, j)
-        y = array.get(ys, j)
-        sx += x
-        sy += y
-        sxx += x * x
-        sxy += x * y
+        sx += array.get(xs, j)
+        sy += array.get(ys, j)
+        sxx += array.get(xs, j) * array.get(xs, j)
+        sxy += array.get(xs, j) * array.get(ys, j)
     den = n * sxx - sx * sx
     sl = den != 0 ? (n * sxy - sx * sy) / den : 0.0
     ic = (sy - sl * sx) / n
     float rmax = 0.0
     for j = 0 to n - 1
-        r = math.abs(array.get(ys, j) - (sl * array.get(xs, j) + ic))
-        rmax := math.max(rmax, r)
+        rmax := math.max(rmax, math.abs(array.get(ys, j) - (sl * array.get(xs, j) + ic)))
     [sl, ic, rmax]
 
-// ---------------------------------------------------------------- pattern trigger (patterns.trigger, one setup)
-// act/lvl/stop/tgt/start/exp describe the armed formation; lvl is the flat level or the sloped line at this bar.
+// --------------------------------------------------------------- breakout triggers (patterns.trigger)
+// Bullish: the FIRST close above the level decides. It must carry ≥ vmult × average volume and (needBos) close above the
+// last confirmed pivot high made after the pattern started, and the plan must offer ≥ minRR. A close at or under the
+// stop first, or the expiry, cancels the setup.
 f_trig(bool act, float lvl, float stp0, float tgt0, int start, int expi, bool needBos, float vmult) =>
     bool fired = false
     bool keep = act
@@ -281,7 +547,7 @@ f_trig(bool act, float lvl, float stp0, float tgt0, int start, int expi, bool ne
         if close <= stp0 or bar_index > expi
             keep := false
         else if close > lvl
-            keep := false                                       // resolves on the first close above the level
+            keep := false
             volOk = not na(volRatio) and volRatio >= vmult
             bosOk = not needBos or lastPhI < 0 or lastPhI <= start or bar_index - lastPhI > 450 or close > lastPhV
             if volOk and bosOk
@@ -296,97 +562,131 @@ f_trig(bool act, float lvl, float stp0, float tgt0, int start, int expi, bool ne
                     tgt := tgtAdj
                     lim := patEntry == "retest" ? ref : na
     [fired, keep, stp, tgt, lim]
+// Bearish (long blockers): the first close under the level with ≥ vmult × volume; a close at or above the stop cancels.
+f_trigBear(bool act, float lvl, float stp0, int expi, float vmult) =>
+    bool fired = false
+    bool keep = act
+    if act
+        if close >= stp0 or bar_index > expi
+            keep := false
+        else if close < lvl
+            keep := false
+            fired := not na(volRatio) and volRatio >= vmult
+    [fired, keep]
 
-// ============================================================================== 1-12  rule strategies
-// 01 Trend baseline (EMA50/200 + ADX) — same rules as Freqtrade CoinAuditTrend
+// ============================================================================== 01-12  RULE STRATEGIES
+// 01 Trend baseline (EMA50/200 + ADX) — the Freqtrade CoinAuditTrend rules
 e01 = close > ema50 and ema50 > ema200 and rsi > 50 and adx > adxMin and diPlus > diMinus and btcOn
-
-// 02 Multi-horizon MA ensemble: price above a rising SMA 20 / 50 / 100, votes
+x01 = close < ema50
+// 02 Multi-horizon MA ensemble: one vote per SMA (20/50/100) that price is above AND that is rising (3 bars)
 smaA = ta.sma(close, 20)
 smaB = ta.sma(close, 50)
 smaC = ta.sma(close, 100)
 maVote = (close > smaA and smaA > smaA[3] ? 1 : 0) + (close > smaB and smaB > smaB[3] ? 1 : 0) + (close > smaC and smaC > smaC[3] ? 1 : 0)
 e02 = maVote >= maVotes
-
-// 03 Donchian breakout: close above the prior N-bar high
+x02 = maVote <= 1
+// 03 Donchian breakout: close above the prior N-bar high; exit under the prior N/2-bar low
 e03 = close > ta.highest(high, donN)[1]
-
-// 04 Volatility-managed momentum: momentum / vol, beating BTC, not in the top vol decile
-mom     = close / close[momL] - 1
-btcMom  = btcClose / btcClose[momL] - 1
-ret1    = close / close[1] - 1
-rv      = ta.stdev(ret1, 30)
+x03 = close < ta.lowest(low, math.max(5, math.floor(donN / 2)))[1]
+// 04 Volatility-managed momentum: L-bar return / (30-bar st.dev × √L), beating BTC, outside the top volatility decile
+mom      = close / close[momL] - 1
+btcMom   = btcClose / btcClose[momL] - 1
+rv       = ta.stdev(close / close[1] - 1, 30)
 momScore = rv > 0 ? mom / (rv * math.sqrt(momL)) : 0.0
-relMom  = isBtc ? 1e-9 : mom - btcMom
-crashQ  = ta.percentile_nearest_rank(rv, math.min(yrBars, 1000), 90)
-crash   = rv > crashQ
+relMom   = isBtc ? 1e-9 : mom - btcMom
+crash    = rv > ta.percentile_nearest_rank(rv, math.min(yrBars, 1000), 90)
 e04 = momScore > momMin and relMom > 0 and not crash
-
-// 05 Trend pullback (NFI-inspired modules): HTF trend, BTC, safe dip, pump guard, volume, EWO guard
+x04 = mom < 0 or relMom < 0 or crash
+// 05 Trend pullback (NFI-inspired modules): HTF trend · BTC · safe dip · pump guard · volume · EWO guard
 pbTrend = na(htfEma200) ? close > ema200 : htfClose > htfEma200
 pbDip   = rsi < pbRsi and (ema20 - close) / atr >= 1.0
 rng24   = ta.highest(high, 24) / ta.lowest(low, 24) - 1
 pumpOk  = rng24 < 8 * atrPct
-pbVol   = volRatio > 0.7                                      // taker-buy share is not available on TV
-ewoQ    = ta.percentile_nearest_rank(ewo, 200, 5)
-ewoOk   = ewo > ewoQ
+pbVol   = volRatio > 0.7                                     // the bot also wants taker-buy share > 42 % (not on TV)
+ewoOk   = ewo > ta.percentile_nearest_rank(ewo, 200, 5)
 e05 = pbTrend and btcOn and pbDip and pumpOk and pbVol and ewoOk
-
-// 06 SMA offset (NotAnotherSMAOffset-style, HO/Protect variant)
+x05 = close > ema20 or rsi > 65
+// 06 SMA offset (NotAnotherSMAOffset, HO/Protect variant)
 sma14 = ta.sma(close, 14)
 rsi4  = ta.rsi(close, 4)
-e06a  = close < sma14 * smaOff and ewo > smaEwo and rsi < 50 and rsi4 < 35
-e06b  = close < sma14 * smaOff and ewo < -8 and rsi4 < 25
-e06 = (e06a or e06b) and btcOn and pumpOk
-
-// 07 BinCluc (BinHV45 + ClucMay Bollinger)
+e06 = ((close < sma14 * smaOff and ewo > smaEwo and rsi < 50 and rsi4 < 35) or (close < sma14 * smaOff and ewo < -8 and rsi4 < 25)) and btcOn and pumpOk
+x06 = close > sma20 * 1.01 and rsi > 50
+// 07 BinCluc: BinHV45 (break under the prior lower BB40 after a big red candle with a small tail) or ClucMay (under lower BB20)
 [mid40, up40, lo40] = ta.bb(close, 40, 2)
-bbDelta    = math.abs(mid40 - lo40)
-closeDelta = math.abs(close - close[1])
-tailLen    = math.abs(close - low)
-binh = lo40[1] > 0 and bbDelta > close * 0.008 and closeDelta > close * 0.0175 and tailLen < bbDelta * 0.25 and close < lo40[1] and close <= close[1]
-cluc = close < ema50 and close < clucMult * bbLo and volume < volSma30 * 20
+bbDelta = math.abs(mid40 - lo40)
+binh    = lo40[1] > 0 and bbDelta > close * 0.008 and math.abs(close - close[1]) > close * 0.0175 and math.abs(close - low) < bbDelta * 0.25 and close < lo40[1] and close <= close[1]
+cluc    = close < ema50 and close < clucMult * bbLo and volume < volSma30 * 20
 e07 = (binh or cluc) and btcOn
-
+x07 = close > bbMid
 // 08 ElliotV-style EWO offset
 ema17 = ta.ema(close, 17)
-e08a  = close < ema17 * ellOff and ewo > ellEwo and rsi < 65
-e08b  = close < ema17 * ellOff and ewo < -19
-e08 = (e08a or e08b) and btcOn
-
-// 09 Multi-indicator confluence score (TrendRider-style)
-cf1 = ema20 > ema50 and ema50 > ema200
-cf2 = rsi >= 50 and rsi <= 70
-cf3 = adx > 20 and diPlus > diMinus
-cf4 = volRatio > 1.2
-cf5 = close > sma20 and bbw > bbw[5]
-cf6 = macdHist > 0 and macdHist > macdHist[1]
-confScore = (cf1 ? 1 : 0) + (cf2 ? 1 : 0) + (cf3 ? 1 : 0) + (cf4 ? 1 : 0) + (cf5 ? 1 : 0) + (cf6 ? 1 : 0)
+ema49 = ta.ema(close, 49)
+e08 = ((close < ema17 * ellOff and ewo > ellEwo and rsi < 65) or (close < ema17 * ellOff and ewo < -19)) and btcOn
+x08 = close > ema49 * 1.006
+// 09 Confluence score (6 parts)
+confScore = (ema20 > ema50 and ema50 > ema200 ? 1 : 0) + (rsi >= 50 and rsi <= 70 ? 1 : 0) + (adx > 20 and diPlus > diMinus ? 1 : 0) +
+     (volRatio > 1.2 ? 1 : 0) + (close > sma20 and bbw > bbw[5] ? 1 : 0) + (macdHist > 0 and macdHist > macdHist[1] ? 1 : 0)
 e09 = confScore >= confK and btcOn
-
-// 10 EMA cross (btc-strategy-lab winner). The funding-rate filter has no data source on TradingView.
+x09 = confScore <= 2
+// 10 EMA cross (btc-strategy-lab winner; its funding filter has no data on TradingView)
 emaF = ta.ema(close, emaFast)
 emaS = ta.ema(close, emaSlow)
 e10 = emaF > emaS
-
-// 11 ICT liquidity sweep + FVG, 50 % entry
+x10 = emaF < emaS
+// 11 ICT liquidity sweep + fair-value gap, limit at 50 % of the displacement
 ictSwing  = ta.lowest(low, ictN)[1]
 ictSweep  = low < ictSwing and close > ictSwing
 ictRecent = ictSweep or ictSweep[1] or ictSweep[2] or ictSweep[3] or ictSweep[4]
-ictFvg    = low > high[2] and close > open
-e11 = ictFvg and ictRecent and btcOn
-ictLow6   = ta.lowest(low, 6)
-ictLim    = (ictLow6 + high) / 2
-ictStop   = ictLow6 - 0.1 * atr
-ictTp     = ictLim + ictTpR * (ictLim - ictStop)
+e11 = low > high[2] and close > open and ictRecent and btcOn
+ictLow6 = ta.lowest(low, 6)
+ictLim  = (ictLow6 + high) / 2
+ictStop = ictLow6 - 0.1 * atr
+// 12 Deep drawdown reclaim (ATH = highest high TradingView loaded)
+athDd = close / ta.max(high) - 1
+hh20  = ta.highest(high, 20)
+e12 = athDd <= -ddLevel and close > hh20[1] and bar_index >= 90
 
-// 12 Deep drawdown reclaim (ATH = highest high of the loaded history — load as much history as TV gives you)
-ath = ta.max(high)
-dd  = close / ath - 1
-e12 = dd <= -ddLevel and close > ta.highest(high, 20)[1] and bar_index >= 90
+// ============================================================================== 13-22  CHART PATTERNS
+// Drawing helpers: one live line / box per armed formation — dashed while armed, solid when it breaks out (kept on
+// the chart), deleted when the formation is invalidated or expires.
+f_track(line ln, bool keep, bool fired, int x1, float y1, int x2, float y2, color cArmed, color cFired) =>
+    line out = ln
+    if (keep or fired) and showDraw and not na(y1) and not na(y2)
+        if na(out)
+            out := line.new(x1, y1, x2, y2, color = cArmed, style = line.style_dashed, width = 1)
+        else
+            line.set_xy1(out, x1, y1)
+            line.set_xy2(out, x2, y2)
+        if fired
+            line.set_color(out, cFired)
+            line.set_style(out, line.style_solid)
+            line.set_width(out, 2)
+            out := na
+    else if not na(out)
+        line.delete(out)
+        out := na
+    out
+f_trackBox(box bx, bool keep, bool fired, int x1, float top, int x2, float bot) =>
+    box out = bx
+    if (keep or fired) and showDraw and not na(top) and not na(bot)
+        if na(out)
+            out := box.new(x1, top, x2, bot, border_color = color.new(colSetup, 30), border_style = line.style_dashed,
+                           bgcolor = color.new(colSetup, 93))
+        else
+            box.set_lefttop(out, x1, top)
+            box.set_rightbottom(out, x2, bot)
+        if fired
+            box.set_border_color(out, colUp)
+            box.set_border_style(out, line.style_solid)
+            box.set_bgcolor(out, color.new(colUp, 90))
+            out := na
+    else if not na(out)
+        box.delete(out)
+        out := na
+    out
 
-// ============================================================================== 13-22  chart patterns
-// 13 Double / triple bottom (W): patterns.double_bottom on the confirmed pivot lows
+// 13 Double / triple bottom (W): 2-3 pivot lows within tolerance, ≥ 5 bars apart, ≤ 150 bars, after a downtrend;
+//    neckline = highest pivot high between, ≥ 2 ATR above the lows. Target = neckline + height. Stop under the lows.
 f_wbottom(int need) =>
     bool ok = false
     float lvl = na
@@ -400,13 +700,15 @@ f_wbottom(int need) =>
         bool spaced = pz - p0 <= 150
         float vmax = na
         float vmin = na
+        float vsum = 0.0
         for j = nPL - need to nPL - 1
             v = array.get(plV, j)
             vmax := na(vmax) ? v : math.max(vmax, v)
             vmin := na(vmin) ? v : math.min(vmin, v)
+            vsum += v
             if j > nPL - need and array.get(plI, j) - array.get(plI, j - 1) < 5
                 spaced := false
-        if spaced and (vmax - vmin) / ((vmax + vmin) / 2) <= f_tol(pz)
+        if spaced and (vmax - vmin) / (vsum / need) <= f_tol(pz)
             [ni, nv] = f_maxPhBetween(p0, pz)
             a = atr[f_off(pz)]
             if ni >= 0 and nv - vmax >= 2 * a and f_priorDown(p0)
@@ -417,7 +719,6 @@ f_wbottom(int need) =>
                 start := p0
                 expi := pz + K + (pz - p0)
     [ok, lvl, stp, tgt, start, expi]
-
 var bool  dbAct = false
 var float dbLvl = na
 var float dbStop = na
@@ -435,9 +736,12 @@ if newPL
         dbStart := wOk3 ? wSt3 : wSt2
         dbExp := wOk3 ? wEx3 : wEx2
 [e13, k13, stop13, tp13, lim13] = f_trig(dbAct, dbLvl, dbStop, dbTgt, dbStart, dbExp, true, volMultIn)
+var line ln13 = na
+ln13 := f_track(ln13, k13, e13, dbStart, dbLvl, bar_index + 2, dbLvl, colSetup, colUp)
 dbAct := k13
 
-// 14 Inverse head & shoulders: head below both shoulders, sloped neckline through the two pivot highs
+// 14 Inverse head & shoulders: head ≥ 0.5 ATR under both shoulders, shoulders level, sloped neckline through the highs
+//    between; prior downtrend. Target = neckline + head depth. Stop under the right shoulder.
 var bool  ihAct = false
 var float ihP0 = na
 var int   ihI0 = 0
@@ -455,50 +759,48 @@ if newPL and nPL >= 3
     vrs = array.get(plV, nPL - 1)
     aHd = atr[f_off(hd)]
     aRs = atr[f_off(rs)]
-    geomOk = rs - ls <= 150 and hd - ls >= 3 and rs - hd >= 3 and vhd < math.min(vls, vrs) - 0.5 * aHd and math.abs(vls - vrs) / vhd <= 2 * f_tol(rs)
-    if geomOk
+    if rs - ls <= 150 and hd - ls >= 3 and rs - hd >= 3 and vhd < math.min(vls, vrs) - 0.5 * aHd and math.abs(vls - vrs) / vhd <= 2 * f_tol(rs)
         [n1i, n1v] = f_maxPhBetween(ls, hd)
         [n2i, n2v] = f_maxPhBetween(hd, rs)
         if n1i >= 0 and n2i >= 0 and math.abs(n2v - n1v) <= 3 * aRs and f_priorDown(ls)
             ihSl = (n2v - n1v) / (n2i - n1i)
-            ihNeckHd = n1v + ihSl * (hd - n1i)
-            ihDepth = math.abs(ihNeckHd - vhd)
             ihAct := true
             ihP0 := n1v
             ihI0 := n1i
             ihSlope := ihSl
             ihStop := vrs - 0.2 * aRs
-            ihTgt := n1v + ihSl * (rs + K - n1i) + ihDepth
+            ihTgt := n1v + ihSl * (rs + K - n1i) + math.abs(n1v + ihSl * (hd - n1i) - vhd)
             ihStart := ls
             ihExp := rs + K + 25
 ihLvl = ihAct ? ihP0 + ihSlope * (bar_index - ihI0) : na
 [e14, k14, stop14, tp14, lim14] = f_trig(ihAct, ihLvl, ihStop, ihTgt, ihStart, ihExp, true, volMultIn)
+var line ln14 = na
+ln14 := f_track(ln14, k14, e14, ihI0, ihP0, bar_index + 2, ihP0 + ihSlope * (bar_index + 2 - ihI0), colSetup, colUp)
 ihAct := k14
 
-// 15/16 Rectangle (patterns.range_box): ≥ 2 touches on a flat top and a flat bottom inside 50 bars
-var bool  rbBox = false                                       // a box is known (range support trades it)
-var bool  rbBrk = false                                       // the breakout setup is armed
+// 15 / 16 Rectangle: ≥ 2 touches at a flat top and a flat bottom inside 50 bars, height 3-14 ATR, no close outside.
+var bool  rbBox = false                                       // a box is known (16 trades inside it)
+var bool  rbBrk = false                                       // its breakout setup (15) is armed
 var int   rbStart = 0
 var int   rbExp = 0
 var float rbTop = na
 var float rbBot = na
 var float rbH = na
+var int   rbDone = -1                                         // start bar of a box that already broke out
 if newPH or newPL
     float[] hv = array.new<float>()
     float[] lv = array.new<float>()
     int s0 = bar_index
     if nPH > 0
         for j = 0 to nPH - 1
-            idx = array.get(phI, j)
-            if idx >= bar_index - 50
+            if array.get(phI, j) >= bar_index - 50
                 array.push(hv, array.get(phV, j))
-                s0 := math.min(s0, idx)
+                s0 := math.min(s0, array.get(phI, j))
     if nPL > 0
         for j = 0 to nPL - 1
-            idx = array.get(plI, j)
-            if idx >= bar_index - 50
+            if array.get(plI, j) >= bar_index - 50
                 array.push(lv, array.get(plV, j))
-                s0 := math.min(s0, idx)
+                s0 := math.min(s0, array.get(plI, j))
     if array.size(hv) >= 2 and array.size(lv) >= 2
         top = array.max(hv)
         bot = array.min(lv)
@@ -506,11 +808,9 @@ if newPH or newPL
         int tT = 0
         int tB = 0
         for j = 0 to array.size(hv) - 1
-            if math.abs(array.get(hv, j) - top) <= th
-                tT += 1
+            tT += math.abs(array.get(hv, j) - top) <= th ? 1 : 0
         for j = 0 to array.size(lv) - 1
-            if math.abs(array.get(lv, j) - bot) <= th
-                tB += 1
+            tB += math.abs(array.get(lv, j) - bot) <= th ? 1 : 0
         height = top - bot
         if tT >= 2 and tB >= 2 and height >= 3 * atr and height <= 14 * atr and not f_closeOutside(s0, bar_index, bot - 0.5 * atr, top + 0.5 * atr)
             rbBox := true
@@ -520,9 +820,12 @@ if newPH or newPL
             rbTop := top
             rbBot := bot
             rbH := height
+// 15 Range breakout: close above the top with volume; stop mid-range; target top + height
 [e15, k15, stop15, tp15, lim15] = f_trig(rbBrk, rbTop, rbBot + 0.5 * rbH, rbTop + rbH, rbStart, rbExp, true, volMultIn)
 rbBrk := k15
-// 16 Range support: buy a bullish close in the bottom zone while the box holds
+if e15
+    rbDone := rbStart
+// 16 Range support: a bullish close (green, higher close) in the bottom zone while the box holds; target just under the top
 e16 = false
 float stop16 = na
 float tp16 = na
@@ -533,64 +836,79 @@ if rbBox
         e16 := true
         stop16 := rbBot - 0.5 * atr
         tp16 := rbTop - 0.1 * rbH
+var box bx15 = na
+bx15 := f_trackBox(bx15, (rbBox or rbBrk) and rbStart != rbDone, e15, rbStart, rbTop, bar_index + 2, rbBot)
 
-// 17 Bull flag / pennant / high tight flag (patterns.flags): impulse pole, controlled 3-15 bar consolidation
+// 17 Bull flag / pennant / high tight flag: a pole (13-bar high ≥ 4 ATR above the 13-bar low), then 3-15 bars that
+//    retrace ≤ 50 % without a new high; close above the flag high with volume. Target = flag high + pole.
 var int   flT1 = -1
 var float flH = na
 var float flPole = na
-var float flAtr = na
 var float flSegH = na
 var float flSegL = na
 e17 = false
 float stop17 = na
 float tp17 = na
-bool flTight = false
+float lim17 = na
+float flLvlNow = na
 if flT1 >= 0
     if bar_index > flT1 + 15
         flT1 := -1
     else if bar_index >= flT1 + 3 and not na(flSegH)
-        retr = (flH - flSegL) / flPole
-        if retr > 0.5 or flSegH > flH
+        if (flH - flSegL) / flPole > 0.5 or flSegH > flH
             flT1 := -1
         else
-            flTight := retr <= 0.25 and flPole >= 8 * flAtr
+            flLvlNow := flSegH
             [ff17, fk17, fs17, ft17, fl17] = f_trig(true, flSegH, flSegL - 0.2 * atr, flSegH + flPole, flT1 - 12, bar_index, false, volMultIn)
             if ff17
                 e17 := true
                 stop17 := fs17
                 tp17 := ft17
-                flT1 := -1
+                lim17 := fl17
+var line ln17 = na
+ln17 := f_track(ln17, flT1 >= 0 and not e17 and not na(flLvlNow), e17, flT1, flLvlNow, bar_index + 2, flLvlNow, colSetup, colUp)
+if e17
+    flT1 := -1
 if flT1 >= 0 and bar_index > flT1
     flSegH := na(flSegH) ? high : math.max(flSegH, high)
     flSegL := na(flSegL) ? low : math.min(flSegL, low)
 low13 = ta.lowest(low, 13)
-poleHere = high == ta.highest(high, 13) and (high - low13) >= 4 * atr
-if poleHere
+if high == ta.highest(high, 13) and (high - low13) >= 4 * atr
     flT1 := bar_index
     flH := high
     flPole := high - low13
-    flAtr := atr
     flSegH := na
     flSegL := na
 
-// 18 Triangles / falling wedge (and the ascending channel used by 22): lines through the last 2-3 pivots each side
-var bool  twAct = false
-var float twP0 = na
-var int   twI0 = 0
-var float twSlope = na
-var float twStop = na
-var float twTgt = na
-var int   twStart = 0
-var int   twExp = 0
-var bool  chAct = false
-var float chUp = na
-var int   chUi = 0
-var float chUs = na
-var float chLp = na
-var int   chLi = 0
-var float chLs = na
-var int   chExp = 0
+// 18 Converging lines through the last 2-3 pivot highs and lows (fit ≤ 0.6 ATR) inside 60 bars (patterns.converging):
+//    ascending / symmetrical triangle and falling wedge break UP (strategy 18); descending / symmetrical triangle and
+//    rising wedge break DOWN (bearish blocker); parallel rising lines = ascending channel (strategy 22).
+var bool   twAct = false
 var string twName = ""
+var float  twP0 = na
+var int    twI0 = 0
+var float  twSlope = na
+var float  twLp = na
+var float  twLs = na
+var float  twStop = na
+var float  twTgt = na
+var int    twStart = 0
+var int    twExp = 0
+var bool   bwAct = false
+var string bwName = ""
+var float  bwP0 = na
+var int    bwI0 = 0
+var float  bwSlope = na
+var float  bwStop = na
+var int    bwExp = 0
+var bool   chAct = false
+var float  chUp = na
+var float  chUs = na
+var float  chLp = na
+var float  chLs = na
+var int    chI0 = 0
+var int    chStart = 0
+var int    chExp = 0
 if newPH or newPL
     float[] xs = array.new<float>()
     float[] ys = array.new<float>()
@@ -611,72 +929,151 @@ if newPH or newPL
         [sl, il, rl] = f_fit3(xl, yl)
         if math.max(ru, rl) <= 0.6 * atr
             start = math.round(math.min(array.get(xs, 0), array.get(xl, 0)))
-            span = bar_index - start
-            upMove = su * span
-            loMove = sl * span
+            upMove = su * (bar_index - start)
+            loMove = sl * (bar_index - start)
             wStart = (su * start + iu) - (sl * start + il)
             wNow = (su * bar_index + iu) - (sl * bar_index + il)
             if wNow > 0 and wStart > 0
                 contracting = wNow < wStart * 0.85 and bbw <= bbw[f_off(start)]
-                flatUp = math.abs(upMove) < atr
-                flatLo = math.abs(loMove) < atr
-                string nm = contracting and flatUp and loMove > atr ? "ascending triangle" :
-                             contracting and upMove < -atr and loMove > atr ? "symmetrical triangle" :
-                             contracting and upMove < 0 and loMove < 0 and su < sl ? "falling wedge" : ""
-                if nm != ""
+                isAsc  = contracting and math.abs(upMove) < atr and loMove > atr
+                isSym  = contracting and upMove < -atr and loMove > atr
+                isDesc = contracting and math.abs(loMove) < atr and upMove < -atr
+                isFall = contracting and upMove < 0 and loMove < 0 and su < sl
+                isRise = contracting and upMove > 0 and loMove > 0 and sl > su
+                isChan = not contracting and math.abs(wNow - wStart) < 0.8 * atr and loMove > atr
+                nm = isAsc ? "ascending triangle" : isSym ? "symmetrical triangle" : isDesc ? "descending triangle" :
+                     isFall ? "falling wedge" : isRise ? "rising wedge" : isChan ? "ascending channel" : ""
+                upNow = su * bar_index + iu
+                loNow = sl * bar_index + il
+                if nm == "ascending triangle" or nm == "symmetrical triangle" or nm == "falling wedge"
                     twAct := true
                     twName := nm
-                    twP0 := su * bar_index + iu
+                    twP0 := upNow
                     twI0 := bar_index
                     twSlope := su
-                    twStop := (sl * bar_index + il) - 0.2 * atr
-                    twTgt := (su * bar_index + iu) + wStart
+                    twLp := loNow
+                    twLs := sl
+                    twStop := loNow - 0.2 * atr
+                    twTgt := upNow + wStart
                     twStart := start
                     twExp := bar_index + 25
-                else if not contracting and math.abs(wNow - wStart) < 0.8 * atr and loMove > atr
+                if nm == "symmetrical triangle" or nm == "descending triangle" or nm == "rising wedge"
+                    bwAct := true
+                    bwName := nm
+                    bwP0 := loNow
+                    bwI0 := bar_index
+                    bwSlope := sl
+                    bwStop := upNow + 0.2 * atr
+                    bwExp := bar_index + 25
+                if nm == "ascending channel"
                     chAct := true
-                    chUp := su * bar_index + iu
-                    chUi := bar_index
+                    chUp := upNow
                     chUs := su
-                    chLp := sl * bar_index + il
-                    chLi := bar_index
+                    chLp := loNow
                     chLs := sl
+                    chI0 := bar_index
+                    chStart := start
                     chExp := bar_index + 20
 twLvl = twAct ? twP0 + twSlope * (bar_index - twI0) : na
 [e18, k18, stop18, tp18, lim18] = f_trig(twAct, twLvl, twStop, twTgt, twStart, twExp, false, volMultIn)
+var line ln18 = na
+var line ln18b = na
+ln18 := f_track(ln18, k18, e18, twStart, twP0 + twSlope * (twStart - twI0), bar_index + 2, twP0 + twSlope * (bar_index + 2 - twI0), colSetup, colUp)
+ln18b := f_track(ln18b, k18, e18, twStart, twLp + twLs * (twStart - twI0), bar_index + 2, twLp + twLs * (bar_index + 2 - twI0), color.new(colSetup, 40), color.new(colUp, 40))
 twAct := k18
 
-// 19 Rounding bottom / cup & handle (patterns.rounding, 60-bar window; the quadratic fit is approximated by
-//    a U-shape test: the low sits in the middle 60 % of the window, both flanks close above the middle)
-rimL     = ta.highest(high, 10)[51]
-lowW     = ta.lowest(low, 60)[1]
-depthR   = rimL - lowW
-lowAt    = -ta.lowestbars(low, 60)[1]
-midOk    = lowAt >= 12 and lowAt <= 47
-vFirst   = ta.sma(volume, 20)[41]
-vMid     = ta.sma(volume, 20)[21]
-vLast    = ta.sma(volume, 20)[1]
-rightRim = ta.highest(high, 10)[1]
-uShape   = ta.sma(close, 15)[46] > ta.sma(close, 30)[16] and ta.sma(close, 15)[1] > ta.sma(close, 30)[16]
-roundOk  = bar_index > 70 and depthR >= 3 * atr[1] and midOk and vMid < vFirst and vLast > vMid and uShape
-recovered = rightRim >= rimL - 0.25 * depthR
-var bool  rcAct = false
-var float rcLvl = na
-var float rcStop = na
-var float rcTgt = na
-var int   rcStart = 0
-var int   rcExp = 0
-if roundOk and (not rcAct or math.abs(rcLvl - (recovered ? math.max(rimL, rightRim) : rimL)) > syminfo.mintick)
-    rcAct := true
-    rcLvl := recovered ? math.max(rimL, rightRim) : rimL
-    rcStop := math.max(lowW, rcLvl - 3 * atr)
-    rcTgt := rcLvl + depthR
-    rcStart := bar_index - 60
-    rcExp := bar_index + (recovered ? 20 : 10)
-[e19, k19, stop19, tp19, lim19] = f_trig(rcAct, rcLvl, rcStop, rcTgt, rcStart, rcExp, true, volMultIn)
-rcAct := k19
+// 19 Rounding bottom (U) and cup & handle (patterns.rounding): a least-squares parabola through the last 60 closes opens
+//    upward (R² ≥ 0.7, vertex inside the middle 40 %), the base is ≥ 3 ATR under the left rim and volume dries up in the
+//    middle third and comes back in the last. U: buy the close above the left rim (stop = base low, at most 3 ATR; 10
+//    candles). Cup & handle: the right side is back within 25 % of the rim and a 4-candle handle holds the top half of
+//    the cup on quiet volume; buy the close above the higher rim (stop under the handle; 20 candles). Target rim + depth.
+f_quad(int s) =>                                              // parabola through the closes s+60 … s+1 candles ago, x = −1 … 1
+    float t0 = 0.0
+    float t1 = 0.0
+    float t2 = 0.0
+    float yy = 0.0
+    float s2 = 0.0
+    float s4 = 0.0
+    y0 = close[s + 1]                                         // shift (the fit's shape does not depend on it)
+    for j = 0 to 59
+        x = -1.0 + 2.0 * j / 59.0
+        y = close[s + 60 - j] - y0
+        t0 += y
+        t1 += x * y
+        t2 += x * x * y
+        yy += y * y
+        s2 += x * x
+        s4 += x * x * x * x
+    qa = (t2 - s2 * t0 / 60.0) / (s4 - s2 * s2 / 60.0)
+    qb = t1 / s2
+    qc = (t0 - qa * s2) / 60.0
+    ssTot = yy - t0 * t0 / 60.0
+    r2 = ssTot > 0 ? 1.0 - (yy - qa * t2 - qb * t1 - qc * t0) / ssTot : 0.0
+    vx = qa != 0 ? -qb / (2.0 * qa) : 9.0
+    [qa, r2, vx]
+[qa0, r20, vx0] = f_quad(0)                                   // window ending on the previous candle
+[qa3, r23, vx3] = f_quad(3)                                   // window ending 4 candles ago (+ a 4-candle handle)
+rimL0  = ta.highest(high, 10)[51]
+lowW0  = ta.lowest(low, 60)[1]
+depth0 = rimL0 - lowW0
+vS20   = ta.sma(volume, 20)
+vS4    = ta.sma(volume, 4)
+uOk    = bar_index > 64 and qa0 > 0 and r20 >= 0.7 and math.abs(vx0) <= 0.4 and depth0 >= 3 * atr[1] and
+     vS20[21] < vS20[41] and vS20[1] > vS20[21]
+rimL3  = ta.highest(high, 10)[54]
+lowW3  = ta.lowest(low, 60)[4]
+depth3 = rimL3 - lowW3
+right3 = ta.highest(high, 10)[4]
+hLow3  = ta.lowest(low, 4)
+cupOk  = bar_index > 67 and qa3 > 0 and r23 >= 0.7 and math.abs(vx3) <= 0.4 and depth3 >= 3 * atr[4] and
+     vS20[24] < vS20[44] and vS20[4] > vS20[24] and right3 >= rimL3 - 0.25 * depth3 and rimL3 - hLow3 <= 0.5 * depth3 and
+     vS4 <= vS20[44]
+var bool  ubAct = false
+var float ubLvl = na
+var float ubStop = na
+var float ubTgt = na
+var int   ubStart = 0
+var int   ubExp = 0
+var float ubSeen = na
+if uOk and (na(ubSeen) or math.abs(rimL0 - ubSeen) > syminfo.mintick)
+    ubSeen := rimL0
+    ubAct := true
+    ubLvl := rimL0
+    ubStop := math.max(lowW0, rimL0 - 3 * atr[1])
+    ubTgt := rimL0 + depth0
+    ubStart := bar_index - 60
+    ubExp := bar_index + 10
+var bool  cuAct = false
+var float cuLvl = na
+var float cuStop = na
+var float cuTgt = na
+var int   cuStart = 0
+var int   cuExp = 0
+var float cuSeen = na
+cupRim = math.max(rimL3, right3)
+if cupOk and (na(cuSeen) or math.abs(cupRim - cuSeen) > syminfo.mintick)
+    cuSeen := cupRim
+    cuAct := true
+    cuLvl := cupRim
+    cuStop := hLow3 - 0.2 * atr[4]
+    cuTgt := cupRim + depth3
+    cuStart := bar_index - 63
+    cuExp := bar_index + 17
+[eUb, kUb, sUb, tUb, lUb] = f_trig(ubAct, ubLvl, ubStop, ubTgt, ubStart, ubExp, true, volMultIn)
+[eCu, kCu, sCu, tCu, lCu] = f_trig(cuAct, cuLvl, cuStop, cuTgt, cuStart, cuExp, true, volMultIn)
+e19    = eUb or eCu
+stop19 = eUb ? sUb : sCu
+tp19   = eUb ? tUb : tCu
+lim19  = eUb ? lUb : lCu
+var line ln19 = na
+var line ln19c = na
+ln19 := f_track(ln19, kUb, eUb, ubStart, ubLvl, bar_index + 2, ubLvl, colSetup, colUp)
+ln19c := f_track(ln19c, kCu, eCu, cuStart, cuLvl, bar_index + 2, cuLvl, colSetup, colUp)
+ubAct := kUb
+cuAct := kCu
 
-// 20 V-bottom reclaim: an 11-bar low confirmed by the next bar, ≥ 6 ATR drop from the pole, reclaim 50 %
+// 20 V-bottom reclaim: an 11-bar low confirmed by a higher close and higher low, ≥ 6 ATR under a high made ≤ 10 bars
+//    earlier; reclaim close above 50 % of the drop with ≥ 1.3× volume and a break of structure. Target = the pre-drop high.
 var bool  vbAct = false
 var float vbLvl = na
 var float vbStop = na
@@ -684,22 +1081,22 @@ var float vbTgt = na
 var int   vbStart = 0
 var int   vbExp = 0
 var int   vbLast = -100
-isBottom = low[1] == ta.lowest(low, 11)[1] and close > close[1] and low > low[1]
-pOff     = 1 - ta.highestbars(high, 11)[1]
-poleHigh = high[pOff]
-vDrop    = poleHigh - low[1]
-if isBottom and vDrop >= 6 * atr[1] and (bar_index - 1) - vbLast >= 20
+pOff = 1 - ta.highestbars(high, 11)[1]
+if low[1] == ta.lowest(low, 11)[1] and close > close[1] and low > low[1] and high[pOff] - low[1] >= 6 * atr[1] and (bar_index - 1) - vbLast >= 20
     vbAct := true
-    vbLvl := low[1] + 0.5 * vDrop
+    vbLvl := low[1] + 0.5 * (high[pOff] - low[1])
     vbStop := low[1] - 0.2 * atr[1]
-    vbTgt := poleHigh
+    vbTgt := high[pOff]
     vbStart := bar_index - pOff
-    vbExp := bar_index - 1 + 10
+    vbExp := bar_index + 9
     vbLast := bar_index - 1
 [e20, k20, stop20, tp20, lim20] = f_trig(vbAct, vbLvl, vbStop, vbTgt, vbStart, vbExp, true, math.max(volMultIn, 1.3))
+var line ln20 = na
+ln20 := f_track(ln20, k20, e20, vbStart, vbLvl, bar_index + 2, vbLvl, colSetup, colUp)
 vbAct := k20
 
-// 21 Downtrend-line break & retest: line through the last two falling pivot highs (≥ 15 bars apart)
+// 21 Downtrend-line break: line through two falling pivot highs ≥ 15 bars apart (≥ 1 ATR lower), never closed above;
+//    every later pivot low updates the stop. Close above the line with volume and a break of structure; target 2R.
 var bool  tlAct = false
 var float tlP0 = na
 var int   tlI0 = 0
@@ -708,6 +1105,8 @@ var float tlStop = na
 var int   tlStart = 0
 var int   tlExp = 0
 var int   tlP2 = -1
+var bool  tlLine = false                                      // the line itself: alive until it expires or breaks
+var float tlA2 = na
 if newPH and nPH >= 2
     p1 = array.get(phI, nPH - 2)
     p2 = array.get(phI, nPH - 1)
@@ -721,59 +1120,211 @@ if newPH and nPH >= 2
             if close[f_off(i)] > v1 + tlSl * (i - p1) + 0.1 * a2
                 broken := true
                 break
-        [qi, qv] = f_lastPlBetween(p1, p2 + 1)
-        if not broken and qi >= 0
+        [tqI, tqV] = f_lastPlBetween(p1, p2 + 1)
+        if not broken and tqI >= 0
+            tlLine := true
+            tlA2 := a2
             tlAct := true
             tlP0 := v1
             tlI0 := p1
             tlSlope := tlSl
-            tlStop := qv - 0.2 * a2
+            tlStop := tqV - 0.2 * a2
             tlStart := p1
             tlExp := p2 + K + 30
             tlP2 := p2
-if tlAct and newPL and lastPlI > tlP2
-    tlStop := lastPlV - 0.2 * atr[f_off(lastPlI)]            // each later pivot low re-arms the line
-tlLvl = tlAct ? tlP0 + tlSlope * (bar_index - tlI0) : na
+tlNow = tlP0 + tlSlope * (bar_index - tlI0)
+if tlLine and (bar_index > tlExp or close > tlNow + 0.1 * tlA2)
+    tlLine := false                                           // a close through the line ends it (the trigger still decides this candle)
+if tlLine and newPL and lastPlI > tlP2 and lastPlI + K <= tlExp
+    tlAct := true                                             // a lower low under the line re-arms it with a new stop
+    tlStop := lastPlV - 0.2 * atr[f_off(lastPlI)]
+tlLvl = tlAct ? tlNow : na
 [e21, k21, stop21, tp21, lim21] = f_trig(tlAct, tlLvl, tlStop, na, tlStart, tlExp, true, volMultIn)
+var line ln21 = na
+ln21 := f_track(ln21, k21, e21, tlI0, tlP0, bar_index + 2, tlP0 + tlSlope * (bar_index + 2 - tlI0), colSetup, colUp)
 tlAct := k21
 
-// 22 Ascending channel bounce: buy the lower line, target the upper
+// 22 Ascending channel bounce: a green candle whose low touches the lower line (within chTouch ATR) and closes above it
 e22 = false
 float stop22 = na
 float tp22 = na
 if chAct
-    lowLine = chLp + chLs * (bar_index - chLi)
-    upLine = chUp + chUs * (bar_index - chUi)
+    lowLine = chLp + chLs * (bar_index - chI0)
     if bar_index > chExp or close < lowLine - 0.5 * atr
         chAct := false
     else if low <= lowLine + chTouch * atr and close > lowLine and close > open
         e22 := true
         stop22 := lowLine - 0.5 * atr
-        tp22 := upLine
+        tp22 := chUp + chUs * (bar_index - chI0)
+var line ln22u = na
+var line ln22l = na
+ln22u := f_track(ln22u, chAct, false, chStart, chUp + chUs * (chStart - chI0), bar_index + 2, chUp + chUs * (bar_index + 2 - chI0), color.new(colPlan, 30), colUp)
+ln22l := f_track(ln22l, chAct, false, chStart, chLp + chLs * (chStart - chI0), bar_index + 2, chLp + chLs * (bar_index + 2 - chI0), color.new(colPlan, 30), colUp)
 
-// ============================================================================== 23-27  price action
-// 23 Bullish candlestick at a key level (patterns.candles ∩ BULL_CANDLES, at a pivot low or the lower BB)
+// ============================================================ BEARISH PATTERNS — long blockers (research only)
+// A bearish pattern completing (close under its level with ≥ 1.2× volume) blocks new long approvals for 3 candles.
+f_mtop(int need) =>                                          // double / triple top (M)
+    bool ok = false
+    float lvl = na
+    float stp = na
+    int start = 0
+    int expi = 0
+    if nPH >= need
+        p0 = array.get(phI, nPH - need)
+        pz = array.get(phI, nPH - 1)
+        bool spaced = pz - p0 <= 150
+        float vmax = na
+        float vmin = na
+        float vsum = 0.0
+        for j = nPH - need to nPH - 1
+            v = array.get(phV, j)
+            vmax := na(vmax) ? v : math.max(vmax, v)
+            vmin := na(vmin) ? v : math.min(vmin, v)
+            vsum += v
+            if j > nPH - need and array.get(phI, j) - array.get(phI, j - 1) < 5
+                spaced := false
+        if spaced and (vmax - vmin) / (vsum / need) <= f_tol(pz)
+            [ni, nv] = f_minPlBetween(p0, pz)
+            a = atr[f_off(pz)]
+            if ni >= 0 and vmin - nv >= 2 * a and f_priorUp(p0)
+                ok := true
+                lvl := nv
+                stp := vmax + 0.2 * a
+                start := p0
+                expi := pz + K + (pz - p0)
+    [ok, lvl, stp, start, expi]
+var bool  mtAct = false
+var float mtLvl = na
+var float mtStop = na
+var int   mtStart = 0
+var int   mtExp = 0
+if newPH
+    [tOk3, tL3, tS3, tSt3, tEx3] = f_mtop(3)
+    [tOk2, tL2, tS2, tSt2, tEx2] = f_mtop(2)
+    if tOk3 or tOk2
+        mtAct := true
+        mtLvl := tOk3 ? tL3 : tL2
+        mtStop := tOk3 ? tS3 : tS2
+        mtStart := tOk3 ? tSt3 : tSt2
+        mtExp := tOk3 ? tEx3 : tEx2
+[bF1, bK1] = f_trigBear(mtAct, mtLvl, mtStop, mtExp, volMultIn)
+var line lnB1 = na
+lnB1 := f_track(lnB1, bK1, bF1, mtStart, mtLvl, bar_index + 2, mtLvl, color.new(colDn, 40), colDn)
+mtAct := bK1
+// head & shoulders top
+var bool  hsAct = false
+var float hsP0 = na
+var int   hsI0 = 0
+var float hsSlope = na
+var float hsStop = na
+var int   hsExp = 0
+if newPH and nPH >= 3
+    hls = array.get(phI, nPH - 3)
+    hhd = array.get(phI, nPH - 2)
+    hrs = array.get(phI, nPH - 1)
+    hvls = array.get(phV, nPH - 3)
+    hvhd = array.get(phV, nPH - 2)
+    hvrs = array.get(phV, nPH - 1)
+    if hrs - hls <= 150 and hhd - hls >= 3 and hrs - hhd >= 3 and hvhd > math.max(hvls, hvrs) + 0.5 * atr[f_off(hhd)] and math.abs(hvls - hvrs) / hvhd <= 2 * f_tol(hrs)
+        [m1i, m1v] = f_minPlBetween(hls, hhd)
+        [m2i, m2v] = f_minPlBetween(hhd, hrs)
+        if m1i >= 0 and m2i >= 0 and math.abs(m2v - m1v) <= 3 * atr[f_off(hrs)] and f_priorUp(hls)
+            hsAct := true
+            hsP0 := m1v
+            hsI0 := m1i
+            hsSlope := (m2v - m1v) / (m2i - m1i)
+            hsStop := hvrs + 0.2 * atr[f_off(hrs)]
+            hsExp := hrs + K + 25
+hsLvl = hsAct ? hsP0 + hsSlope * (bar_index - hsI0) : na
+[bF2, bK2] = f_trigBear(hsAct, hsLvl, hsStop, hsExp, volMultIn)
+var line lnB2 = na
+lnB2 := f_track(lnB2, bK2, bF2, hsI0, hsP0, bar_index + 2, hsP0 + hsSlope * (bar_index + 2 - hsI0), color.new(colDn, 40), colDn)
+hsAct := bK2
+// bear flag / pennant: a pole down (13-bar low ≥ 4 ATR under the 13-bar high), 3-15 bars retracing ≤ 50 %
+var int   bfT1 = -1
+var float bfL = na
+var float bfPole = na
+var float bfSegH = na
+var float bfSegL = na
+bF3 = false
+if bfT1 >= 0
+    if bar_index > bfT1 + 15
+        bfT1 := -1
+    else if bar_index >= bfT1 + 3 and not na(bfSegL)
+        if (bfSegH - bfL) / bfPole > 0.5 or bfSegL < bfL
+            bfT1 := -1
+        else if close >= bfSegH + 0.2 * atr
+            bfT1 := -1
+        else if close < bfSegL
+            bF3 := not na(volRatio) and volRatio >= volMultIn
+            bfT1 := -1
+if bfT1 >= 0 and bar_index > bfT1
+    bfSegH := na(bfSegH) ? high : math.max(bfSegH, high)
+    bfSegL := na(bfSegL) ? low : math.min(bfSegL, low)
+high13 = ta.highest(high, 13)
+if low == ta.lowest(low, 13) and (high13 - low) >= 4 * atr
+    bfT1 := bar_index
+    bfL := low
+    bfPole := high13 - low
+    bfSegH := na
+    bfSegL := na
+// descending / symmetrical triangle, rising wedge breaking down
+bwLvl = bwAct ? bwP0 + bwSlope * (bar_index - bwI0) : na
+[bF4, bK4] = f_trigBear(bwAct, bwLvl, bwStop, bwExp, volMultIn)
+var line lnB4 = na
+lnB4 := f_track(lnB4, bK4, bF4, math.max(0, bwI0 - 20), bwP0 + bwSlope * (math.max(0, bwI0 - 20) - bwI0), bar_index + 2, bwP0 + bwSlope * (bar_index + 2 - bwI0), color.new(colDn, 40), colDn)
+bwAct := bK4
+
+// rounding top: the same parabola opening downward, ≥ 3 ATR tall; breaks under the left rim
+rimLt  = ta.lowest(low, 10)[51]
+highW0 = ta.highest(high, 60)[1]
+rtOk   = bar_index > 64 and qa0 < 0 and r20 >= 0.7 and math.abs(vx0) <= 0.4 and highW0 - rimLt >= 3 * atr[1]
+var bool  rtAct = false
+var float rtLvl = na
+var float rtStop = na
+var int   rtStart = 0
+var int   rtExp = 0
+var float rtSeen = na
+if rtOk and (na(rtSeen) or math.abs(rimLt - rtSeen) > syminfo.mintick)
+    rtSeen := rimLt
+    rtAct := true
+    rtLvl := rimLt
+    rtStop := math.min(highW0, rimLt + 3 * atr[1])
+    rtStart := bar_index - 60
+    rtExp := bar_index + 10
+[bF5, bK5] = f_trigBear(rtAct, rtLvl, rtStop, rtExp, volMultIn)
+var line lnB5 = na
+lnB5 := f_track(lnB5, bK5, bF5, rtStart, rtLvl, bar_index + 2, rtLvl, color.new(colDn, 40), colDn)
+rtAct := bK5
+
+bearEvent = bF1 or bF2 or bF3 or bF4 or bF5
+bearName  = bF1 ? "double/triple top" : bF2 ? "head & shoulders" : bF3 ? "bear flag" : bF4 ? bwName : bF5 ? "rounding top" : ""
+var int    bearBar = -100
+var string bearLast = ""
+if bearEvent
+    bearBar := bar_index
+    bearLast := bearName
+bearFresh = useBear and bar_index - bearBar <= 2
+
+// ============================================================================== 23-27  PRICE ACTION
+// 23 Bullish candlestick at a key level: one of 9 bullish candles AND the low within calLevel ATR of a pivot low of the
+//    last 100 bars or at/under the lower Bollinger band. Stop 0.2 ATR under the low; target calTpR × risk.
 cBody   = math.abs(close - open)
 cRng    = math.max(high - low, 1e-12)
 upW     = high - math.max(open, close)
 loW     = math.min(open, close) - low
 cBull   = close > open
-po      = open[1]
-pc      = close[1]
-ppo     = open[2]
-ppc     = close[2]
-pBody   = math.abs(pc - po)
+pBody   = math.abs(close[1] - open[1])
 trendDn = close < ta.sma(close, 10)
-cEngulf   = cBull and pc < po and close >= po and open <= pc and cBody > pBody
-cHammer   = trendDn and loW >= 2 * cBody and upW <= 0.3 * cBody + 1e-12 and cBody > 0
-cInvHam   = trendDn and upW >= 2 * cBody and loW <= 0.3 * cBody + 1e-12 and cBody > 0
-cMorning  = ppc < ppo and math.abs(pc - po) <= 0.3 * math.abs(ppc - ppo) and cBull and close > (ppo + ppc) / 2
-cPierce   = pc < po and cBull and open < pc and close > (po + pc) / 2 and close < po
-cSoldiers = cBull and pc > po and ppc > ppo and close > pc and pc > ppc
-cTweezer  = trendDn and math.abs(low - low[1]) <= 0.001 * close and pc < po and cBull
-cHarami   = pc < po and cBull and open > pc and close < po and cBody < pBody
-cMarubozu = cBull and cBody >= 0.9 * cRng
-bullCandle = cEngulf or cHammer or cInvHam or cMorning or cPierce or cSoldiers or cTweezer or cHarami or cMarubozu
+bullCandle = (cBull and close[1] < open[1] and close >= open[1] and open <= close[1] and cBody > pBody) or                  // engulfing
+     (trendDn and loW >= 2 * cBody and upW <= 0.3 * cBody + 1e-12 and cBody > 0) or                                         // hammer
+     (trendDn and upW >= 2 * cBody and loW <= 0.3 * cBody + 1e-12 and cBody > 0) or                                         // inverted hammer
+     (close[2] < open[2] and math.abs(close[1] - open[1]) <= 0.3 * math.abs(close[2] - open[2]) and cBull and close > (open[2] + close[2]) / 2) or   // morning star
+     (close[1] < open[1] and cBull and open < close[1] and close > (open[1] + close[1]) / 2 and close < open[1]) or        // piercing line
+     (cBull and close[1] > open[1] and close[2] > open[2] and close > close[1] and close[1] > close[2]) or                  // three white soldiers
+     (trendDn and math.abs(low - low[1]) <= 0.001 * close and close[1] < open[1] and cBull) or                             // tweezer bottom
+     (close[1] < open[1] and cBull and open > close[1] and close < open[1] and cBody < pBody) or                           // bullish harami
+     (cBull and cBody >= 0.9 * cRng)                                                                                        // bullish marubozu
 bool nearPivotLow = false
 if bullCandle and nPL > 0
     for j = 0 to nPL - 1
@@ -782,25 +1333,22 @@ if bullCandle and nPL > 0
             break
 e23 = bullCandle and (nearPivotLow or low <= bbLo)
 stop23 = low - 0.2 * atr
-tp23 = close + calTpR * (close - stop23)
 
-// 24 SMC: sweep of the last confirmed pivot low → bullish BOS within 10 bars with an FVG → order block (last
-//    bearish candle before the displacement); the signal is the BOS bar, the entry is the OB retest (limit)
-var int   smcSweptFor = -1
+// 24 SMC: a sweep of the last confirmed pivot low (wick under, close back above) → within 10 bars a close above the last
+//    pivot high (BOS) with a fair-value gap → order block = last red candle before the move; limit at the OB top.
+var int   smcFor = -1
 var int   smcT = -1
 var float smcLvl = na
 var float smcSweepLow = na
-if smcT < 0 and lastPlI >= 0 and lastPlI != smcSweptFor and bar_index >= lastPlI + K + 1 and bar_index < lastPlI + 60
+if smcT < 0 and lastPlI >= 0 and lastPlI != smcFor and bar_index >= lastPlI + K + 1 and bar_index < lastPlI + 60
     if low < lastPlV and close > lastPlV
-        smcSweptFor := lastPlI
-        divOk = not smcDiv or rsi > rsi[f_off(lastPlI)]
-        if divOk and lastPhI >= 0
+        smcFor := lastPlI
+        if (not smcDiv or rsi > rsi[f_off(lastPlI)]) and lastPhI >= 0
             smcT := bar_index
             smcLvl := lastPhV
             smcSweepLow := low
 e24 = false
 float stop24 = na
-float tp24 = na
 float lim24 = na
 if smcT >= 0
     if bar_index > smcT + 10
@@ -820,15 +1368,14 @@ if smcT >= 0
             e24 := true
             lim24 := math.max(open[obOff], close[obOff])
             stop24 := math.min(low[obOff], smcSweepLow) - 0.1 * atr
-            tp24 := lim24 + smcTpR * (lim24 - stop24)
         smcT := -1
 
-// 25 Bullish RSI failure swing (patterns.failure_swing): RSI < 30 → bounce → higher RSI low above 30 → break
+// 25 Bullish RSI failure swing: RSI < 30 → bounce to a peak → higher low above 30 (≥ 5 under the peak) → break of the peak
 var int   fsState = 0
 var float fsPeak = na
 var int   fsPeakI = -1
 var int   fsJ = -1
-var int   fsK = -1
+var int   fsKk = -1
 var float fsLow = na
 e25 = false
 if fsState == 0
@@ -844,224 +1391,689 @@ else if fsState == 1
         fsPeakI := bar_index
 else if fsState == 2
     fsLow := math.min(fsLow, low)
-    if rsi > fsPeak
-        fsPeak := rsi
-        fsPeakI := bar_index
-    if bar_index > fsPeakI + 1 and rsi > 30 and rsi < fsPeak - 5
-        fsState := 3
-        fsK := bar_index
-    else if bar_index >= fsJ + 30
+    if bar_index >= fsJ + 30
         fsState := 0
+    else
+        if rsi > fsPeak
+            fsPeak := rsi
+            fsPeakI := bar_index
+        if bar_index > fsPeakI + 1 and rsi > 30 and rsi < fsPeak - 5
+            fsState := 3
+            fsKk := bar_index
 else
     fsLow := math.min(fsLow, low)
     if rsi > fsPeak
-        if rsi[1] > 30
-            e25 := true
+        e25 := rsi[1] > 30
         fsState := 0
-    else if bar_index >= fsK + 20
+    else if bar_index >= fsKk + 20
         fsState := 0
 stop25 = fsLow - 0.2 * atr
-tp25 = close + fsTpR * (close - stop25)
 
-// 26 Squeeze breakout: BB width in the lowest N % of 120 bars within the last 5 bars, new 20-bar high, volume
-sqQ      = ta.percentile_nearest_rank(bbw, 120, sqPct)
-sqNow    = bbw <= sqQ
-squeezed = sqNow or sqNow[1] or sqNow[2] or sqNow[3] or sqNow[4]
-low10    = ta.lowest(low, 10)
-e26 = squeezed and close > ta.highest(high, 20)[1] and volRatio >= sqVol and btcOn
-stop26 = low10 - 0.2 * atr
+// 26 Squeeze breakout: BB width in its lowest sqPct % of 120 bars within the last 5 bars, close above the prior 20-bar high
+//    on ≥ sqVol × volume, BTC risk-on. Stop under the 10-bar low; trailing stop after +5 %.
+sqNow  = bbw <= ta.percentile_nearest_rank(bbw, 120, sqPct)
+e26 = (sqNow or sqNow[1] or sqNow[2] or sqNow[3] or sqNow[4]) and close > hh20[1] and volRatio >= sqVol and btcOn
+stop26 = ta.lowest(low, 10) - 0.2 * atr
 
-// 27 Mean reversion to a 50-bar rolling VWAP after a z-score extreme, on a reversal candle
+// 27 VWAP reversion: the previous close > vwZ standard deviations under the 50-bar rolling VWAP, then a close above the
+//    prior high. Target = the VWAP; stop under the 5-bar low.
 vwap50 = math.sum(hlc3 * volume, 50) / math.sum(volume, 50)
 vwDev  = close - vwap50
 vwSd   = ta.stdev(vwDev, 50)
-vwZ_   = vwSd > 0 ? vwDev / vwSd : 0.0
-low5   = ta.lowest(low, 5)
-e27 = vwZ_[1] < -vwZ and close > high[1]
-stop27 = low5 - 0.2 * atr
-tp27 = vwap50
+vwZs   = vwSd > 0 ? vwDev / vwSd : 0.0
+e27 = vwZs[1] < -vwZ and close > high[1]
+stop27 = ta.lowest(low, 5) - 0.2 * atr
 
-// ==================================================================================== the library, assembled
-f_edge(bool x) => x and not x[1]                             // state strategies: mark the bar the condition turns on
-var string[] sCode = array.from("EMA/ADX", "MA-ens", "Donchian", "VolMom", "Pullback", "SMAoff", "BinCluc", "Elliot", "Confl",
-     "EMAx", "ICT", "DD-reclaim", "W-bottom", "iH&S", "RangeBrk", "RangeSup", "Flag", "Tri/Wedge", "Round/Cup", "V-bottom",
-     "TL-break", "Channel", "CandleLvl", "SMC", "RSI-FS", "Squeeze", "VWAP-rev")
+// ================================================================ THE LIBRARY: metadata (constant) and this candle
+f_edge(bool x) => x and not x[1]                                           // state strategies: the candle it switches on
+var string[] sCode = array.from("EMA/ADX", "MA-ens", "Donchian", "VolMom", "Pullback", "SMA-off", "BinCluc", "Elliot", "Confl",
+     "EMA-x", "ICT", "DD-reclaim", "W-bottom", "iH&S", "Range-brk", "Range-sup", "Flag", "Tri/Wedge", "Cup", "V-bottom",
+     "TL-break", "Channel", "Candle", "SMC", "RSI-FS", "Squeeze", "VWAP")
 var string[] sName = array.from("Trend baseline EMA50/200+ADX", "MA trend ensemble", "Donchian breakout", "Vol-managed momentum",
-     "Trend pullback (NFI modules)", "SMA offset", "BinCluc BB", "Elliot EWO offset", "Confluence score", "EMA cross",
-     "ICT sweep + FVG", "Deep drawdown reclaim", "Double/triple bottom", "Inverse H&S", "Range breakout", "Range support",
-     "Bull flag / pennant", "Triangle / wedge", "Rounding / cup", "V-bottom reclaim", "Trendline break", "Channel bounce",
-     "Candle at level", "SMC sweep→BOS→OB", "RSI failure swing", "Squeeze breakout", "VWAP reversion")
-var string[] sMode = array.from(s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19,
-     s20, s21, s22, s23, s24, s25, s26, s27)
+     "Trend pullback (NFI)", "SMA offset", "BinCluc Bollinger dip", "Elliot EWO offset", "Confluence score", "EMA cross",
+     "ICT sweep + FVG", "Deep drawdown reclaim", "Double / triple bottom", "Inverse head & shoulders", "Range breakout",
+     "Range support", "Bull flag / pennant", "Triangle / falling wedge", "Rounding bottom / cup", "V-bottom reclaim",
+     "Trendline break", "Channel bounce", "Candle at key level", "SMC sweep→BOS→OB", "RSI failure swing", "Squeeze breakout",
+     "VWAP reversion")
+var string[] sFam = array.from("trend", "trend", "trend", "momentum", "pullback", "dip", "dip", "dip", "trend", "trend",
+     "smart money", "rebound", "chart pattern", "chart pattern", "chart pattern", "range", "continuation", "continuation",
+     "chart pattern", "chart pattern", "chart pattern", "channel", "candlestick", "smart money", "reversal", "momentum", "mean reversion")
 var string[] sReq = array.from("trend", "trend", "trend", "momentum", "trend_pullback", "dip", "dip", "dip", "trend", "any", "any",
      "any", "any", "any", "any", "range", "trend", "any", "any", "any", "any", "trend_pullback", "any", "any", "any", "momentum", "dip")
+var bool[] sChopOk = array.from(false, false, false, false, false, true, true, true, false, false, false, false, false, false, false,
+     true, false, false, false, false, false, true, true, false, false, false, true)    // the bot's RANGE_FAMILIES
+var string[] sMode = array.from(s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19,
+     s20, s21, s22, s23, s24, s25, s26, s27)
+var string[] sHow = array.from(
+     "Long while close > EMA50 > EMA200, RSI > 50, ADX > " + str.tostring(adxMin) + " with +DI > −DI and BTC risk-on. Exit: close < EMA50. Stop 2 ATR.",
+     "One vote per SMA 20/50/100 that price is above and that is rising (vs 3 bars ago). Long at ≥ " + str.tostring(maVotes) + " votes, exit at ≤ 1. Stop 3 ATR.",
+     "Long on a close above the prior " + str.tostring(donN) + "-bar high. Exit on a close under the prior " + str.tostring(math.max(5, math.floor(donN / 2))) + "-bar low. Stop 2 ATR.",
+     str.tostring(momL) + "-bar return ÷ (30-bar volatility × √" + str.tostring(momL) + ") > " + str.tostring(momMin) + ", beating BTC over the same period, not in the top 10 % volatility (crash filter). Exit when momentum or relative strength turns negative. Stop 3 ATR.",
+     "Higher-timeframe uptrend + BTC risk-on + safe dip (RSI < " + str.tostring(pbRsi) + " and ≥ 1 ATR under EMA20) + pump guard + volume ≥ 0.7× + EWO above its 5th percentile. Exit: close > EMA20 or RSI > 65; 24-bar limit.",
+     "Close < SMA14 × " + str.tostring(smaOff) + " with EWO > " + str.tostring(smaEwo) + ", RSI < 50, RSI(4) < 35 — or EWO < −8 with RSI(4) < 25. BTC risk-on, pump guard. Exit: close > SMA20 × 1.01 and RSI > 50; ROI 8 %→3 %→0.5 %, trail 1 % after +2 %.",
+     "BinHV45: close under the prior lower BB40 after a wide band and a big red candle with a small tail — or ClucMay: close < EMA50 and < lower BB20 × " + str.tostring(clucMult) + ". Exit: close > BB20 middle; ROI 5 %→2 %→0 %.",
+     "Close < EMA17 × " + str.tostring(ellOff) + " with EWO > " + str.tostring(ellEwo) + " and RSI < 65 — or capitulation EWO < −19. BTC risk-on. Exit: close > EMA49 × 1.006; ROI 20 %→4 %→0 %, trail 1 % after +3 %.",
+     "6 parts: EMA20>50>200 · RSI 50-70 · ADX > 20 with +DI · volume > 1.2× · close > SMA20 with widening BB · MACD histogram > 0 and rising. Long at ≥ " + str.tostring(confK) + ", exit at ≤ 2; early-loss cuts, trail 2.5 % after +5 %.",
+     "EMA " + str.tostring(emaFast) + " above EMA " + str.tostring(emaSlow) + " = long, the cross back = exit. (The bot also needs 3-day funding below a ceiling — no funding data on TradingView.) Stop 3 ATR.",
+     "Wick under the prior " + str.tostring(ictN) + "-bar low that closes back above (sweep) within 5 bars, then a bullish fair-value gap on a green candle. Limit at 50 % of the displacement, stop under the sweep, target " + str.tostring(ictTpR) + "R.",
+     "Price ≥ " + str.tostring(ddLevel * 100) + " % under its all-time high, then a close above the prior 20-bar high (reclaim). Stop −25 %, target +" + str.tostring(ddTp * 100) + " %, 90-bar limit.",
+     "2-3 pivot lows at the same level (≤ 0.5-1.5 %), ≥ 5 bars apart, after a downtrend; neckline ≥ 2 ATR above. First close above the neckline with ≥ 1.2× volume and a break of structure. Target = neckline + height.",
+     "Head ≥ 0.5 ATR under two level shoulders after a downtrend; sloped neckline through the highs between. Close above the neckline with volume. Target = neckline + head depth.",
+     "≥ 2 touches at a flat top and bottom inside 50 bars, height 3-14 ATR, no close outside. Close above the top with volume. Stop mid-range, target = top + height.",
+     "Inside a validated range: a green candle with a higher close in the bottom " + str.tostring(rsZone * 100) + " % of the box. Stop 0.5 ATR under the bottom, target just under the top.",
+     "Pole: 13-bar high ≥ 4 ATR above the 13-bar low; then 3-15 bars retracing ≤ 50 % without a new high. Close above the flag high with volume. Target = flag high + pole.",
+     "Lines through the last 2-3 pivot highs and lows converge ≥ 15 % with a shrinking BB width (ascending / symmetrical triangle, falling wedge). Close above the upper line with volume. Target = line + starting width.",
+     "A parabola through the last 60 closes opens upward (R² ≥ 0.7, bottom in the middle), base ≥ 3 ATR deep, volume dries up then returns. U: close above the left rim (10 candles). Cup & handle: right side back near the rim + a quiet 4-candle handle in the top half; close above the rim (20 candles). With volume and a break of structure; target = rim + depth.",
+     "A ≥ 6 ATR drop within 10 bars to an 11-bar low, confirmed by a higher close and low; reclaim close above 50 % of the drop with ≥ 1.3× volume and a break of structure. Target = the pre-drop high.",
+     "Line through two falling pivot highs ≥ 15 bars apart, never closed above; every later pivot low under it re-arms the setup with that low as the stop. Close above the line with volume and a break of structure. Target 2R.",
+     "Rising parallel channel. A green candle whose low comes within " + str.tostring(chTouch) + " ATR of the lower line and closes above it. Stop 0.5 ATR under the line, target the upper line.",
+     "9 bullish candlesticks (engulfing, hammer, inverted hammer, morning star, piercing, three soldiers, tweezer, harami, marubozu) only within " + str.tostring(calLevel) + " ATR of a pivot low or at the lower BB. Target " + str.tostring(calTpR) + "R.",
+     "Sweep of the last pivot low → close above the last pivot high within 10 bars with a fair-value gap → buy the retest of the order block (last red candle before the move). Target " + str.tostring(smcTpR) + "R.",
+     "RSI under 30, a bounce to a peak, a higher low above 30, then RSI breaks above the peak: momentum failed to make a new low. Stop under the swing low, target " + str.tostring(fsTpR) + "R.",
+     "Bollinger width in its lowest " + str.tostring(sqPct) + " % of 120 bars within 5 bars, then a close above the prior 20-bar high on ≥ " + str.tostring(sqVol) + "× volume. Stop under the 10-bar low; trail 2.5 % after +5 %.",
+     "The previous close was > " + str.tostring(vwZ) + " standard deviations under the 50-bar VWAP; now a close above the prior high. Target = the VWAP, stop under the 5-bar low.")
+// exit mechanics of each strategy in the bot's backtest: fallback stop (ATR), time limit (bars, 0 = none),
+// trailing stop (activation, distance), limit-order validity (bars)
+var float[] xAtr = array.from(2.0, 3.0, 2.0, 3.0, 2.5, 3.0, 2.0, 3.0, 2.0, 3.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0)
+var int[]   xMax = array.from(0, 0, 0, 0, 24, 120, 72, 120, 60, 0, 30, 90, 40, 40, 40, 40, 40, 40, 40, 40, 40, 30, 30, 40, 40, 40, 30)
+var float[] xTrA = array.from(0.0, 0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.03, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0)
+var float[] xTrP = array.from(0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.01, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0)
+var int[]   xLimB = array.from(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 5, 5, 5, 0, 5, 5, 5, 5, 5, 0, 0, 10, 0, 0, 0)
+
 bool[] sOn = array.from(e01, e02, e03, e04, e05, e06, e07, e08, e09, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21,
      e22, e23, e24, e25, e26, e27)
 bool[] sNew = array.from(f_edge(e01), f_edge(e02), f_edge(e03), f_edge(e04), f_edge(e05), f_edge(e06), f_edge(e07), f_edge(e08),
      f_edge(e09), f_edge(e10), e11, f_edge(e12), e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27)
-bool[] sFit = array.from(regTrend, regTrend, regTrend, regPull, regPull, regPull, regPull, regPull, regTrend, regAny, regAny,
-     regAny, regAny, regAny, regAny, regRange, regTrend, regAny, regAny, regAny, regAny, regPull, regAny, regAny, regAny,
-     regPull, regPull)
-// stop / target the strategy itself proposes (na = use the trade plan)
-float[] sStop = array.from(float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), ictStop, float(na), stop13, stop14, stop15, stop16, stop17, stop18,
-     stop19, stop20, stop21, stop22, stop23, stop24, stop25, stop26, stop27)
-float[] sTp = array.from(float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), ictTp, float(na), tp13, tp14,
-     tp15, tp16, tp17, tp18, tp19, tp20, tp21, tp22, tp23, tp24, tp25, float(na), tp27)
+bool[] sExit = array.from(x01, x02, x03, x04, x05, x06, x07, x08, x09, x10, false, false, false, false, false, false, false, false,
+     false, false, false, false, false, false, false, false, false)
+float[] sStop = array.from(float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na),
+     float(na), ictStop, float(na), stop13, stop14, stop15, stop16, stop17, stop18, stop19, stop20, stop21, stop22, stop23, stop24,
+     stop25, stop26, stop27)
+float[] sTp = array.from(float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na),
+     float(na), float(na), float(na), tp13, tp14, tp15, tp16, tp17, tp18, tp19, tp20, tp21, tp22, float(na), float(na), float(na),
+     float(na), vwap50)
+float[] sLim = array.from(float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na), float(na),
+     float(na), ictLim, float(na), lim13, lim14, lim15, float(na), lim17, lim18, lim19, lim20, lim21, float(na), float(na), lim24,
+     float(na), float(na), float(na))
 
-string firedTxt = ""
+// ======================================================= CHART BACKTEST — every strategy paper-traded (validation.backtest)
+// Signal on a closed candle → fill at the next open (or a limit order valid N candles). Stop = the strategy's own stop
+// (kept just under the fill) / −25 % (12) / N ATR. Target = its own target / R multiple / +x % (12). Exits checked in
+// the bot's order: stop (worse of stop / open) → target → ROI ladder → exit signal / time limit / early-loss cut at the
+// open. Trailing stops after an activation gain. 2-candle cooldown after a stop. Costs on both sides.
+var bool[]  btIn   = array.new<bool>(27, false)
+var float[] btPx   = array.new<float>(27, na)
+var float[] btSl   = array.new<float>(27, na)
+var float[] btTp   = array.new<float>(27, na)
+var int[]   btBar  = array.new<int>(27, 0)
+var float[] btPeak = array.new<float>(27, na)
+var float[] btAtrE = array.new<float>(27, na)
+var int[]   btCool = array.new<int>(27, -1)
+var int[]   btExB  = array.new<int>(27, -1)
+var int[]   btS1   = array.new<int>(27, -1000)        // the last two stop-outs (StoplossGuard)
+var int[]   btS2   = array.new<int>(27, -1000)
+var float[] pdLim  = array.new<float>(27, na)
+var int[]   pdExp  = array.new<int>(27, -1)
+var float[] pdSl   = array.new<float>(27, na)
+var float[] pdTp   = array.new<float>(27, na)
+var float[] pdAtr  = array.new<float>(27, na)
+var bool[]  pOn    = array.new<bool>(27, false)       // the last CLOSED candle's signals (what the dashboard shows)
+var bool[]  pNew   = array.new<bool>(27, false)
+var bool[]  pExit  = array.new<bool>(27, false)
+var float[] pSl    = array.new<float>(27, na)
+var float[] pTp    = array.new<float>(27, na)
+var float[] pLim   = array.new<float>(27, na)
+var int[]   stN    = array.new<int>(27, 0)
+var int[]   stW    = array.new<int>(27, 0)
+var float[] stSum  = array.new<float>(27, 0.0)
+var float[] stGW   = array.new<float>(27, 0.0)
+var float[] stGL   = array.new<float>(27, 0.0)
+var float[] stGW2  = array.new<float>(27, 0.0)
+var float[] stGL2  = array.new<float>(27, 0.0)
+var int[]   stHN   = array.new<int>(27, 0)
+var float[] stHS   = array.new<float>(27, 0.0)
+cost      = btCost / 100
+holdStart = last_bar_index - math.round(last_bar_index * gHoldPct / 100.0)
+
+f_record(int i, float px, float out, int eb) =>
+    r  = out / px * (1 - cost) / (1 + cost) - 1
+    r2 = out / px * (1 - 2 * cost) / (1 + 2 * cost) - 1
+    array.set(stN, i, array.get(stN, i) + 1)
+    array.set(stW, i, array.get(stW, i) + (r > 0 ? 1 : 0))
+    array.set(stSum, i, array.get(stSum, i) + r)
+    array.set(stGW, i, array.get(stGW, i) + math.max(r, 0))
+    array.set(stGL, i, array.get(stGL, i) + math.max(-r, 0))
+    array.set(stGW2, i, array.get(stGW2, i) + math.max(r2, 0))
+    array.set(stGL2, i, array.get(stGL2, i) + math.max(-r2, 0))
+    if eb >= holdStart
+        array.set(stHN, i, array.get(stHN, i) + 1)
+        array.set(stHS, i, array.get(stHS, i) + r)
+    r
+f_stopped(int i) =>                                                  // cooldown 2 candles; 3 stops in 48 candles → pause 24
+    cool = array.get(btS2, i) > bar_index - 48 ? bar_index + 24 : bar_index + 2
+    array.set(btS2, i, array.get(btS1, i))
+    array.set(btS1, i, bar_index)
+    array.set(btCool, i, math.max(array.get(btCool, i), cool))
+f_open(int i, float fill, float slSig, float tpSig, float atrSig) =>
+    float sl = not na(slSig) ? math.min(slSig, fill * 0.999) : i == 11 ? fill * 0.75 : fill - array.get(xAtr, i) * atrSig
+    float tpR = i == 10 ? ictTpR : i == 22 ? calTpR : i == 23 ? smcTpR : i == 24 ? fsTpR : na
+    float tp = not na(tpR) ? fill + tpR * (fill - sl) : i == 11 ? fill * (1 + ddTp) : na
+    if not na(tpSig) and tpSig > fill
+        tp := tpSig
+    array.set(btIn, i, true)
+    array.set(btPx, i, fill)
+    array.set(btSl, i, sl)
+    array.set(btTp, i, tp)
+    array.set(btBar, i, bar_index)
+    array.set(btPeak, i, fill)
+    array.set(btAtrE, i, atrSig)
+    if low <= sl                                                     // stopped out on the entry candle
+        f_record(i, fill, sl, bar_index)
+        array.set(btIn, i, false)
+        array.set(btExB, i, bar_index)
+        f_stopped(i)
+    fill
+
+if barstate.isconfirmed
+    for i = 0 to 26
+        if array.get(btIn, i)
+            px   = array.get(btPx, i)
+            held = bar_index - array.get(btBar, i)
+            pk   = array.get(btPeak, i)
+            float sl = array.get(btSl, i)
+            if array.get(xTrA, i) > 0 and pk >= px * (1 + array.get(xTrA, i))
+                sl := math.max(sl, pk * (1 - array.get(xTrP, i)))
+                array.set(btSl, i, sl)
+            tp = array.get(btTp, i)
+            float out = na
+            bool stopped = false
+            if low <= sl
+                out := math.min(sl, open)
+                stopped := true
+            else if not na(tp) and high >= tp
+                out := math.max(tp, open)
+            else
+                float need = i == 5 ? (held >= 60 ? 0.005 : held >= 30 ? 0.03 : 0.08) : i == 6 ? (held >= 48 ? 0.0 : held >= 24 ? 0.02 : 0.05) :
+                     i == 7 ? (held >= 90 ? 0.0 : held >= 30 ? 0.04 : 0.20) : na
+                if not na(need) and high >= px * (1 + need)
+                    out := math.max(open, px * (1 + need))
+            if na(out)
+                ae  = array.get(btAtrE, i)
+                cut = i == 8 and ((held - 1 >= 3 and close[1] - px <= -1.0 * ae) or (held - 1 >= 6 and close[1] - px <= -0.5 * ae) or (held - 1 >= 12 and close[1] - px <= 0.0))
+                mx  = array.get(xMax, i)
+                if (array.get(pExit, i) and bar_index - 1 > array.get(btBar, i)) or (mx > 0 and held >= mx) or cut
+                    out := open
+            if not na(out)
+                f_record(i, px, out, array.get(btBar, i))
+                array.set(btIn, i, false)
+                array.set(btExB, i, bar_index)
+                if stopped
+                    f_stopped(i)
+            else
+                array.set(btPeak, i, math.max(pk, high))
+        else
+            bool filled = false
+            if array.get(pdExp, i) >= 0                              // a resting limit order: expires or fills
+                if bar_index > array.get(pdExp, i)
+                    array.set(pdExp, i, -1)
+                else if low <= array.get(pdLim, i)
+                    array.set(pdExp, i, -1)
+                    f_open(i, math.min(open, array.get(pdLim, i)), array.get(pdSl, i), array.get(pdTp, i), array.get(pdAtr, i))
+                    filled := true
+            if not filled and array.get(pOn, i) and bar_index - 1 >= array.get(btCool, i) and array.get(btExB, i) < bar_index and not na(atr[1])
+                lim = array.get(pLim, i)
+                if not na(lim) and array.get(xLimB, i) > 0
+                    array.set(pdLim, i, lim)
+                    array.set(pdExp, i, bar_index - 1 + array.get(xLimB, i))
+                    array.set(pdSl, i, array.get(pSl, i))
+                    array.set(pdTp, i, array.get(pTp, i))
+                    array.set(pdAtr, i, atr[1])
+                    if low <= lim
+                        array.set(pdExp, i, -1)
+                        f_open(i, math.min(open, lim), array.get(pSl, i), array.get(pTp, i), atr[1])
+                else
+                    f_open(i, open, array.get(pSl, i), array.get(pTp, i), atr[1])
+    for i = 0 to 26                                                  // this candle's signals act on the next candle
+        array.set(pOn, i, array.get(sOn, i))
+        array.set(pNew, i, array.get(sNew, i))
+        array.set(pExit, i, array.get(sExit, i))
+        array.set(pSl, i, array.get(sStop, i))
+        array.set(pTp, i, array.get(sTp, i))
+        array.set(pLim, i, array.get(sLim, i))
+
+// the paper-trading record of strategy i: [trades, win rate, profit factor, expectancy, PF at 2x costs, holdout trades,
+// holdout expectancy, status]   PASS = all gates (G1 expectancy > 0 · G2 PF · G4 PF at 2x costs > 1 · G7 holdout ≥ 3 trades
+// and > 0 · G8 trades) · partial = profitable with enough trades but a gate fails · few = not enough trades · fail
+f_stats(int i) =>
+    n   = array.get(stN, i)
+    gw  = array.get(stGW, i)
+    gl  = array.get(stGL, i)
+    pf  = gl > 0 ? gw / gl : gw > 0 ? 99.0 : 0.0
+    pf2 = array.get(stGL2, i) > 0 ? array.get(stGW2, i) / array.get(stGL2, i) : array.get(stGW2, i) > 0 ? 99.0 : 0.0
+    ex  = n > 0 ? array.get(stSum, i) / n : 0.0
+    wr  = n > 0 ? array.get(stW, i) * 1.0 / n : 0.0
+    hn  = array.get(stHN, i)
+    hx  = hn > 0 ? array.get(stHS, i) / hn : na
+    pass = n >= gMinTr and pf >= gMinPf and ex > 0 and pf2 > 1.0 and (not gNeedHold or (hn >= 3 and hx > 0))
+    st  = pass ? "PASS" : n < gMinTr ? "few" : ex > 0 ? "partial" : "fail"
+    [n, wr, pf, ex, pf2, hn, hx, st]
+
+// ================================================================ APPROVAL on the last CLOSED candle (audit.audit)
+// On the forming candle every decision uses the previous (closed) candle — as the bot does. Nothing repaints.
+f_clf(float x) => barstate.isconfirmed ? x : x[1]
+f_clb(bool x) => barstate.isconfirmed ? x : x[1]
+f_cls(string x) => barstate.isconfirmed ? x : x[1]
+f_pct(float x) => (x >= 0 ? "+" : "") + str.tostring(x * 100, "#.##") + " %"
+f_px(float x) => str.tostring(math.round_to_mintick(x), format.mintick)
+cRegTrend = f_clb(regTrend)
+cRegPull  = f_clb(regPull)
+cRegRange = f_clb(regRange)
+cRegAny   = f_clb(regAny)
+cBtcOn    = f_clb(btcOn)                                      // the filter's state (always risk-on when switched off)
+cBtcRaw   = f_clb(btcOnRaw)
+cLiqOk    = f_clb(liquidityOk)
+cBear     = f_clb(bearFresh)
+cBearName = f_cls(bearLast)
+cMReg     = f_cls(mRegime)
+cMBeh     = f_cls(mBehave)
+cMItems   = f_cls(mItems)
+cAlt      = f_clf(altScore)
+cBtcS     = f_clf(btcScoreM)
+cMAvail   = f_clb(mAvail)
+cTrendSt  = f_cls(trendSt)
+cDirUp    = f_clb(dirUp)
+cVolSt    = f_cls(volSt)
+cStruct   = f_cls(structure)
+cQv24     = f_clf(qv24)
+
+f_fit(int i) =>                                                // regime.matches()
+    req = array.get(sReq, i)
+    req == "trend" ? cRegTrend : req == "range" ? cRegRange : req == "any" ? cRegAny : cRegPull
+f_validated(int i, string st) =>
+    autoOk = st == "PASS"
+    manOk = array.get(sMode, i) == "Validated ✓"
+    apprMode == "Auto: chart-backtest gates" ? autoOk : apprMode == "Manual: my ✓ list" ? manOk : autoOk or manOk
+f_block(int i, bool val) =>                                    // market.gate() + liquidity floor + bearish blockers
+    string why = ""
+    if not cLiqOk
+        why := "24h volume under the floor"
+    else if useBear and cBear
+        why := "bearish " + cBearName + " just completed"
+    else if useMktGate and cMAvail
+        if cMReg == "High-volatility event"
+            why := "high-volatility event: manual approval only"
+        else if cMReg == "BTC selloff" and not isBtc
+            why := "BTC selloff: altcoin longs off"
+        else if cMReg == "Risk-off / stablecoin rotation" and (not isBtc or not val)
+            why := "risk-off: only validated BTC longs"
+        else if cMReg == "Range / chop" and not array.get(sChopOk, i)
+            why := "chop: trend / breakout modules paused"
+        else if not isBtc and cAlt < 50
+            why := "altcoin score " + str.tostring(cAlt, "#") + " < 50"
+        else if not isBtc and cAlt < 70 and not val
+            why := "altcoin score " + str.tostring(cAlt, "#") + ": validated only"
+        else if isBtc and cBtcS < 40
+            why := "BTC score " + str.tostring(cBtcS, "#") + " < 40"
+    why
+// [validated, approved, half-risk, reason] for strategy i whose chart-test status is st and whose signal state is isOn
+f_appr(int i, string st, bool isOn) =>
+    val  = f_validated(i, st)
+    half = not val and apprCand and st == "partial"
+    why  = f_block(i, val)
+    [val, isOn and (val or half) and f_fit(i) and why == "", half, why]
+
+int    nAppr = 0
+int    nAppNew = 0
+int    nFired = 0
+int    nOn = 0
+int    nAcc = 0
+int    nCand = 0
+int    nAccOn = 0
+int    nCandOn = 0
+int    lead = -1
+bool   leadVal = false
 string apprTxt = ""
-int firedCount = 0
-int apprCount = 0
-int onCount = 0
-float sigStop = na
-float sigTp = na
+string firedTxt = ""
+string tipTxt = ""
+string liveTxt = ""
 for i = 0 to 26
-    m = array.get(sMode, i)
-    if m != "off"
-        if array.get(sOn, i)
-            onCount += 1
-        if array.get(sNew, i)
-            firedCount += 1
-            firedTxt := firedTxt + (firedTxt == "" ? "" : ", ") + array.get(sCode, i)
-            if na(sigStop) and not na(array.get(sStop, i))
-                sigStop := array.get(sStop, i)
-                sigTp := array.get(sTp, i)
-            if m == "validated" and array.get(sFit, i)
-                apprCount += 1
-                apprTxt := apprTxt + (apprTxt == "" ? "" : ", ") + array.get(sCode, i)
-anyNew = firedCount > 0
-approvedNow = apprCount > 0
+    if array.get(sMode, i) != "Off"
+        [n, wr, pf, ex, pf2, hn, hx, st] = f_stats(i)
+        fit = f_fit(i)
+        isOn = array.get(pOn, i)
+        isNew = array.get(pNew, i)
+        [val, appr, half, why] = f_appr(i, st, isOn)
+        nAcc += val ? 1 : 0
+        nCand += not val and st == "partial" ? 1 : 0
+        nAccOn += val and isOn and fit ? 1 : 0
+        nCandOn += not val and st == "partial" and isOn and fit ? 1 : 0
+        nOn += isOn ? 1 : 0
+        if appr
+            nAppr += 1
+            nAppNew += isNew ? 1 : 0
+            if lead < 0 or (val and not leadVal)                    // a validated strategy leads before a half-risk one
+                lead := i
+                leadVal := val
+            apprTxt := apprTxt + (apprTxt == "" ? "" : ", ") + array.get(sCode, i) + (half ? " ½" : "")
+        if isNew
+            nFired += 1
+            firedTxt := firedTxt + (firedTxt == "" ? "" : " · ") + array.get(sCode, i) + (appr ? " ✔" : "")
+        if isNew and str.length(tipTxt) < 3000                     // a tooltip holds a few thousand characters
+            verdictTxt = appr ? (half ? "APPROVED at half risk (partial)" : "APPROVED") : not val and not half ? "not validated (chart test: " + st + ")" :
+                 not fit ? "regime does not fit (needs " + array.get(sReq, i) + ")" : "blocked — " + why
+            tipTxt := tipTxt + (appr ? "✔ " : "• ") + array.get(sName, i) + " — " + verdictTxt + "\n   chart test: " + str.tostring(n) + " trades · win " +
+                 str.tostring(wr * 100, "#") + " % · PF " + str.tostring(pf, "#.##") + " · " + f_pct(ex) + " per trade" +
+                 (na(array.get(pSl, i)) ? "" : " · its stop " + f_px(array.get(pSl, i))) + (na(array.get(pTp, i)) ? "" : " · target " + f_px(array.get(pTp, i))) + "\n"
+        if not barstate.isconfirmed and array.get(sNew, i)
+            liveTxt := liveTxt + (liveTxt == "" ? "" : ", ") + array.get(sCode, i)
 
-// ------------------------------------------------------------------------- the trade plan (audit.trade_plan)
-planLow0 = math.max(math.min(ema20, close), close - 0.75 * atr)
-planLow  = math.min(planLow0, close - 0.25 * atr)
-swing20  = ta.lowest(low, 20)
-planStop0 = math.min(swing20 - 0.25 * atr, close - planStopAtr * atr)
-planStop = math.max(planStop0, planLow - 3 * atr)
-planRef  = (planLow + close) / 2
-planRisk = planRef - planStop
+// ===================================================================== CHECKS → SCORE → VERDICT (checks.py, audit.verdict)
+f_band(float x) => x >= 100e6 ? 100.0 : x >= 25e6 ? 85.0 : x >= 5e6 ? 65.0 : x >= 1e6 ? 40.0 : x >= 250e3 ? 20.0 : 0.0
+rsiS   = rsi >= 50 and rsi <= 68 ? 100.0 : rsi > 68 and rsi <= 78 ? 55.0 : rsi > 78 ? 25.0 : rsi >= 40 ? 55.0 : rsi >= 30 ? 35.0 : 25.0
+momS   = 0.4 * rsiS + 0.35 * ((macdHist > 0 ? 50.0 : 0.0) + (macdHist > macdHist[2] ? 50.0 : 0.0)) + 0.25 * math.max(0.0, math.min(100.0, 50 + (close / close[20] - 1) * 500))
+volS   = na(dAtrPct) ? 50.0 : (dAtrPct < 0.015 ? 45.0 : dAtrPct <= 0.06 ? 90.0 : dAtrPct <= 0.10 ? 60.0 : 25.0) - (dMdd90 < -0.5 ? 20.0 : 0.0)
+rsS    = isBtc ? (btcOnRaw ? 75.0 : 35.0) : 50 + math.max(-30.0, math.min(30.0, (nz(dRet30) - nz(bRet30)) * 150)) +
+     math.max(-20.0, math.min(20.0, (nz(dRet90) - nz(bRet90)) * 60)) + (btcOnRaw ? 10.0 : -15.0)
+flowS  = 50.0 + (dP7 > 0 and dVr7 > 1.2 ? 10.0 : dP7 > 0 and dVr7 < 0.8 ? -5.0 : dP7 < 0 and dVr7 > 1.2 ? -10.0 : 0.0)
+sLiq   = f_band(cQv24)
+sTrend = f_clf(0.45 * nz(ptsD) + 0.35 * nz(pts4) + 0.20 * nz(pts1))
+sMom   = f_clf(momS)
+sVol   = f_clf(math.max(0.0, math.min(100.0, volS)))
+sRs    = f_clf(math.max(0.0, math.min(100.0, rsS)))
+sFlow  = f_clf(flowS)
+sMkt   = f_clf(mktScore)
+sLib   = nAcc == 0 and nCand == 0 ? 25.0 : math.min(100.0, 35.0 + 22 * math.min(nAccOn, 2) + 10 * math.min(nCandOn, 2) + 6 * math.min(nAcc, 3) + 2 * math.min(nCand, 3))
+wMkt   = cMAvail ? 15.0 : 0.0
+scoreRaw = (10 * sLiq + 13 * sTrend + 6 * sMom + 5 * sVol + 9 * sRs + 6 * sFlow + wMkt * nz(sMkt) + 28 * sLib) / (10 + 13 + 6 + 5 + 9 + 6 + wMkt + 28)
+score  = math.min(scoreRaw, not cLiqOk ? 35.0 : 100.0, not cBtcOn ? 64.9 : 100.0, nAppr == 0 ? 64.9 : 100.0)
+verdict = score >= 70 ? "FAVORABLE" : score >= 55 ? "WATCHLIST" : score >= 40 ? "NEUTRAL" : "AVOID"
+capTxt = (not cLiqOk ? "illiquid → AVOID · " : "") + (not cBtcOn ? "BTC risk-off → capped at WATCHLIST · " : "") + (nAppr == 0 ? "no approved signal → capped at WATCHLIST" : "")
+
+// =============================================================================== TRADE PLAN (audit.trade_plan)
+cClose  = f_clf(close)
+cAtr    = f_clf(atr)
+cEma20  = f_clf(ema20)
+cLow20  = f_clf(ta.lowest(low, 20))
+leadAtr = lead >= 0 ? array.get(xAtr, lead) : planStopAtr
+planLow  = math.min(math.max(math.min(cEma20, cClose), cClose - 0.75 * cAtr), cClose - 0.25 * cAtr)
+planHigh = cClose
+planStop = math.max(math.min(cLow20 - 0.25 * cAtr, cClose - leadAtr * cAtr), planLow - 3 * cAtr)
+planRef  = (planLow + planHigh) / 2
+planRisk = math.max(planRef - planStop, syminfo.mintick)
 planT1   = planRef + 1.5 * planRisk
 planT2   = planRef + 3.0 * planRisk
 planStopPct = planRisk / planRef
-planSizePct = math.min((riskPct / 100) / planStopPct, 1.0) * 100
+planRiskPct = lead >= 0 and not leadVal ? riskPct / 2 : riskPct              // the bot halves the risk for CANDIDATEs
+planSizePct = math.min(planRiskPct / 100 / planStopPct, 1.0) * 100
 planUsd  = accountUsd * planSizePct / 100
 
-// nearest armed breakout level above price (what "wait for the breakout" refers to)
-float setupLvl = na
-string setupName = ""
+// nearest armed breakout level above price — what "wait for the breakout" refers to
 f_nearer(float cur, float cand) => na(cand) or cand <= close ? cur : na(cur) or cand < cur ? cand : cur
-if dbAct
-    setupLvl := f_nearer(setupLvl, dbLvl)
-    setupName := setupLvl == dbLvl ? "W bottom" : setupName
-if ihAct
-    setupLvl := f_nearer(setupLvl, ihLvl)
-    setupName := setupLvl == ihLvl ? "inverse H&S" : setupName
-if rbBrk
-    setupLvl := f_nearer(setupLvl, rbTop)
-    setupName := setupLvl == rbTop ? "range top" : setupName
-if twAct
-    setupLvl := f_nearer(setupLvl, twLvl)
-    setupName := setupLvl == twLvl ? twName : setupName
-if rcAct
-    setupLvl := f_nearer(setupLvl, rcLvl)
-    setupName := setupLvl == rcLvl ? "rounding/cup rim" : setupName
-if vbAct
-    setupLvl := f_nearer(setupLvl, vbLvl)
-    setupName := setupLvl == vbLvl ? "V-bottom reclaim" : setupName
-if tlAct
-    setupLvl := f_nearer(setupLvl, tlLvl)
-    setupName := setupLvl == tlLvl ? "trendline" : setupName
-if flT1 >= 0 and not na(flSegH)
-    setupLvl := f_nearer(setupLvl, flSegH)
-    setupName := setupLvl == flSegH ? "flag top" : setupName
+float setupLvl = na
+setupLvl := dbAct ? f_nearer(setupLvl, dbLvl) : setupLvl
+setupLvl := ihAct ? f_nearer(setupLvl, ihLvl) : setupLvl
+setupLvl := rbBrk ? f_nearer(setupLvl, rbTop) : setupLvl
+setupLvl := twAct ? f_nearer(setupLvl, twLvl) : setupLvl
+setupLvl := ubAct ? f_nearer(setupLvl, ubLvl) : setupLvl
+setupLvl := cuAct ? f_nearer(setupLvl, cuLvl) : setupLvl
+setupLvl := vbAct ? f_nearer(setupLvl, vbLvl) : setupLvl
+setupLvl := tlAct ? f_nearer(setupLvl, tlLvl) : setupLvl
+setupLvl := flT1 >= 0 ? f_nearer(setupLvl, flSegH) : setupLvl
+setupName = na(setupLvl) ? "" : setupLvl == dbLvl ? "W bottom neckline" : setupLvl == ihLvl ? "inverse H&S neckline" :
+     setupLvl == rbTop ? "range top" : setupLvl == twLvl ? twName : setupLvl == ubLvl ? "rounding-bottom rim" :
+     setupLvl == cuLvl ? "cup & handle rim" :
+     setupLvl == vbLvl ? "V-bottom reclaim" : setupLvl == tlLvl ? "downtrend line" : "flag high"
+cSetupLvl  = f_clf(setupLvl)
+cSetupName = f_cls(setupName)
 
-// ----------------------------------------------------------------------------------------- plots & markers
-plot(showEma ? ema20 : na, "EMA 20", color = color.new(color.orange, 0), linewidth = 1)
-plot(showEma ? ema50 : na, "EMA 50", color = color.new(color.blue, 0), linewidth = 1)
-plot(showEma ? ema200 : na, "EMA 200", color = color.new(color.purple, 0), linewidth = 2)
-plot(setupLvl, "Nearest breakout level (armed pattern)", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 1)
-plotshape(approvedNow, "Approved signal (validated strategy, regime fits)", style = shape.triangleup, location = location.belowbar,
-     color = color.new(color.lime, 0), size = size.small)
-plotshape(anyNew and not approvedNow, "Strategy fired", style = shape.circle, location = location.belowbar,
-     color = color.new(color.gray, 20), size = size.tiny)
-bgcolor(useBtc and not btcOnRaw ? color.new(color.red, 94) : na, title = "BTC risk-off (daily)")
+// ==================================================================== WHAT TO DO NOW (brief.build, live price)
+inZone  = close >= planLow * 0.998 and close <= planHigh * 1.002
+actCode = verdict == "AVOID" ? "AVOID" : nAppr > 0 ? (close <= planStop ? "INVALID" : close > planHigh * 1.002 ? "WAIT_PULLBACK" :
+     close < planLow * 0.998 ? "BELOW_ZONE" : "BUY_ZONE") :
+     not na(cSetupLvl) ? "WAIT_BREAKOUT" : "WATCH"
+actCol  = actCode == "BUY_ZONE" ? colAppr : actCode == "WAIT_PULLBACK" or actCode == "WAIT_BREAKOUT" or actCode == "BELOW_ZONE" ? colSetup :
+     actCode == "WATCH" ? C_NEUT : colDn
+suffix  = (not cBtcOn and not isBtc ? " BTC is risk-off — altcoin longs are capped." : "") + (cBear ? " Bearish " + cBearName + " just completed — longs blocked." : "") +
+     (cMAvail and (cMReg == "High-volatility event" or cMReg == "BTC selloff" or cMReg == "Risk-off / stablecoin rotation") ? " Market: " + cMReg + "." : "")
+actTxt  = actCode == "BUY_ZONE" ? "BUY ZONE LIVE — " + apprTxt + ": buy " + f_px(planLow) + "–" + f_px(planHigh) + ", stop " + f_px(planStop) + " (" + f_pct(planStop / close - 1) +
+     "), T1 " + f_px(planT1) + " (1.5R), T2 " + f_px(planT2) + " (3R), size " + str.tostring(planSizePct, "#.#") + " % of the account." :
+     actCode == "WAIT_PULLBACK" ? "WAIT FOR THE PULLBACK — " + apprTxt + " is live but price is " + f_pct(close / planHigh - 1) + " above the zone " + f_px(planLow) + "–" + f_px(planHigh) + ". Don't chase." :
+     actCode == "BELOW_ZONE" ? "UNDER THE ZONE — " + apprTxt + " is live but price is " + f_pct(close / planLow - 1) + " under " + f_px(planLow) + ", still above the stop " + f_px(planStop) + ". Stretched: buy only after a close back above " + f_px(planLow) + "." :
+     actCode == "INVALID" ? "PLAN INVALID — price is under the stop " + f_px(planStop) + ". Wait for a new signal." :
+     actCode == "WAIT_BREAKOUT" ? "WAIT FOR THE BREAKOUT — a " + timeframe.period + " close above " + f_px(cSetupLvl) + " (" + cSetupName + ") with ≥ " + str.tostring(volMultIn) + "× volume." + suffix :
+     actCode == "AVOID" ? "STAY OUT — " + capTxt + "." + suffix : "NOTHING TO DO YET — no validated strategy is firing in a fitting regime." + suffix
 
-if showLabels and anyNew and barstate.isconfirmed
-    label.new(bar_index, low, (approvedNow ? "✔ " + apprTxt + "\n" : "") + firedTxt, style = label.style_label_up,
-         color = approvedNow ? color.new(color.green, 10) : color.new(color.gray, 35), textcolor = color.white, size = size.tiny)
+// ======================================================================================= CHART: lines and markers
+plot(showEma ? ema20 : na, "EMA 20", color = #f7a600, linewidth = 1)
+plot(showEma ? ema50 : na, "EMA 50", color = #2962ff, linewidth = 1)
+plot(showEma ? ema200 : na, "EMA 200", color = #9c27b0, linewidth = 2)
+plot(setupLvl, "Nearest breakout level", color = colSetup, style = plot.style_linebr, linewidth = 1)
+bgcolor(showBg and useBtc and not btcOnRaw ? color.new(colDn, 94) : na, title = "BTC risk-off (daily)")
+plot(score, "Verdict score", color = C_NEUT, display = display.data_window)
+plot(cMAvail ? (isBtc ? cBtcS : cAlt) : na, "Market score", color = C_NEUT, display = display.data_window)
+plot(nAppr, "Approved strategies", color = colAppr, display = display.data_window)
+plot(nOn, "Strategies on", color = C_NEUT, display = display.data_window)
+plotshape(barstate.isconfirmed and nAppNew > 0, "Approved signal", style = shape.triangleup, location = location.belowbar,
+     color = colAppr, size = size.small)
+plotshape(barstate.isconfirmed and nFired > 0 and nAppNew == 0, "Strategy fired", style = shape.circle, location = location.belowbar,
+     color = color.new(C_NEUT, 30), size = size.tiny)
+plotshape(barstate.isconfirmed and bearEvent, "Bearish pattern (blocks longs)", style = shape.triangledown, location = location.abovebar,
+     color = colDn, size = size.tiny)
 
-// trade plan on the last bar
-var box   planBox = na
-var line  lnStop = na
-var line  lnT1 = na
-var line  lnT2 = na
-var label lbPlan = na
+if barstate.isconfirmed and labelMode != "Off"
+    if nFired > 0 and (labelMode == "All signals" or nAppNew > 0)
+        label.new(bar_index, low, (nAppNew > 0 ? "▲ BUY  " : "") + firedTxt, yloc = yloc.belowbar, style = label.style_label_up,
+             color = nAppNew > 0 ? colAppr : color.new(C_NEUT, 25), textcolor = color.white, size = size.tiny,
+             tooltip = tipTxt + "Regime " + trendSt + (dirUp ? " up" : " down") + " · vol " + volSt + " · BTC " + (btcOnRaw ? "risk-on" : "risk-off") +
+             "\nPlan: entry " + f_px(planLow) + "–" + f_px(planHigh) + " · stop " + f_px(planStop) + " · T1 " + f_px(planT1) + " · T2 " + f_px(planT2))
+    if bearEvent and labelMode == "All signals"
+        label.new(bar_index, high, "▼ " + bearName, yloc = yloc.abovebar, style = label.style_label_down, color = color.new(colDn, 15),
+             textcolor = color.white, size = size.tiny, tooltip = "Bearish " + bearName + " completed on volume. New long approvals are blocked for 3 candles (the bot's long blocker).")
+
+// trade plan on the last candle: entry zone, risk (red) and reward (green) to T1 / T2, the lead strategy's own stop / target
+var box   bxZone = na
+var box   bxRisk = na
+var box   bxRew1 = na
+var box   bxRew2 = na
+var label lbEntry = na
+var label lbStop = na
+var label lbT1 = na
+var label lbT2 = na
 if showPlan and barstate.islast
-    xa = bar_index - 8
-    xb = bar_index + 14
-    if na(planBox)
-        planBox := box.new(xa, close, xb, planLow, border_color = color.new(color.blue, 30), bgcolor = color.new(color.blue, 82))
-        lnStop := line.new(xa, planStop, xb, planStop, color = color.new(color.red, 0), style = line.style_dashed, width = 1)
-        lnT1 := line.new(xa, planT1, xb, planT1, color = color.new(color.green, 0), style = line.style_dashed, width = 1)
-        lnT2 := line.new(xa, planT2, xb, planT2, color = color.new(color.green, 40), style = line.style_dashed, width = 1)
-        lbPlan := label.new(xb, planT2, "", style = label.style_label_left, color = color.new(color.black, 20), textcolor = color.white, size = size.small)
-    box.set_lefttop(planBox, xa, close)
-    box.set_rightbottom(planBox, xb, planLow)
-    line.set_xy1(lnStop, xa, planStop)
-    line.set_xy2(lnStop, xb, planStop)
-    line.set_xy1(lnT1, xa, planT1)
-    line.set_xy2(lnT1, xb, planT1)
-    line.set_xy1(lnT2, xa, planT2)
-    line.set_xy2(lnT2, xb, planT2)
-    label.set_xy(lbPlan, xb, planT2)
-    label.set_text(lbPlan, "Plan · entry " + str.tostring(planLow, format.mintick) + "–" + str.tostring(close, format.mintick)
-         + "\nstop " + str.tostring(planStop, format.mintick) + " (" + str.tostring(-planStopPct * 100, "#.#") + "%)"
-         + "\nT1 " + str.tostring(planT1, format.mintick) + " (1.5R) · T2 " + str.tostring(planT2, format.mintick) + " (3R)"
-         + "\nsize " + str.tostring(planSizePct, "#.#") + "% ≈ $" + str.tostring(planUsd, "#") + " for " + str.tostring(riskPct, "#.#") + "% risk")
+    xa = bar_index + 2
+    xb = bar_index + 18
+    if na(bxZone)
+        bxZone  := box.new(xa, planHigh, xb, planLow, border_color = color.new(colPlan, 10), bgcolor = color.new(colPlan, 75))
+        bxRisk  := box.new(xa, planRef, xb, planStop, border_color = color.new(colDn, 60), bgcolor = color.new(colDn, 86))
+        bxRew1  := box.new(xa, planT1, xb, planRef, border_color = color.new(colUp, 60), bgcolor = color.new(colUp, 86))
+        bxRew2  := box.new(xa, planT2, xb, planT1, border_color = color.new(colUp, 75), bgcolor = color.new(colUp, 93))
+        lbEntry := label.new(xb, planRef, "", style = label.style_label_left, color = colPlan, textcolor = color.white, size = size.small)
+        lbStop  := label.new(xb, planStop, "", style = label.style_label_left, color = colDn, textcolor = color.white, size = size.small)
+        lbT1    := label.new(xb, planT1, "", style = label.style_label_left, color = colUp, textcolor = color.white, size = size.small)
+        lbT2    := label.new(xb, planT2, "", style = label.style_label_left, color = color.new(colUp, 30), textcolor = color.white, size = size.small)
+    box.set_lefttop(bxZone, xa, planHigh)
+    box.set_rightbottom(bxZone, xb, planLow)
+    box.set_lefttop(bxRisk, xa, planRef)
+    box.set_rightbottom(bxRisk, xb, planStop)
+    box.set_lefttop(bxRew1, xa, planT1)
+    box.set_rightbottom(bxRew1, xb, planRef)
+    box.set_lefttop(bxRew2, xa, planT2)
+    box.set_rightbottom(bxRew2, xb, planT1)
+    label.set_xy(lbEntry, xb, planRef)
+    label.set_xy(lbStop, xb, planStop)
+    label.set_xy(lbT1, xb, planT1)
+    label.set_xy(lbT2, xb, planT2)
+    label.set_text(lbEntry, (nAppr > 0 ? "BUY " : "Entry ") + f_px(planLow) + "–" + f_px(planHigh) + " · size " + str.tostring(planSizePct, "#.#") + " % ≈ $" + str.tostring(planUsd, "#,###"))
+    label.set_text(lbStop, "Stop " + f_px(planStop) + " (" + f_pct(planStop / planRef - 1) + ") · risk $" + str.tostring(accountUsd * planRiskPct / 100, "#,###"))
+    label.set_text(lbT1, "T1 " + f_px(planT1) + " (" + f_pct(planT1 / planRef - 1) + " · 1.5R)")
+    label.set_text(lbT2, "T2 " + f_px(planT2) + " (" + f_pct(planT2 / planRef - 1) + " · 3R)")
+    label.set_tooltip(lbEntry, nAppr > 0 ? "Approved: " + apprTxt + ". Buy inside the zone; do not chase above it." : "Reference levels only — no approved signal.")
 
-// ---------------------------------------------------------------------------------------- strategy board
-var table tb = table.new(position.top_right, 4, 32, bgcolor = color.new(color.black, 12), border_width = 1, border_color = color.new(color.gray, 70))
-f_fitTxt(string req) =>
-    req == "trend" ? (regTrend ? "fits" : "no fit") : req == "range" ? (regRange ? "fits" : "no fit") :
-     req == "any" ? (regAny ? "fits" : "thin") : (regPull ? "fits" : "no fit")
-if showBoard and barstate.islast
-    regTxt = trendSt + (dirUp ? " up" : " down") + " · vol " + volSt + " · BTC " + (btcOnRaw ? "risk-on" : "RISK-OFF") + " · liq " + (liquidityOk ? "ok" : "thin") + " · structure " + structure
-    action = approvedNow ? "BUY ZONE LIVE: " + apprTxt :
-         not na(setupLvl) ? "WAIT FOR THE BREAKOUT: " + setupName + " above " + str.tostring(setupLvl, format.mintick) :
-         anyNew ? "Signal(s) fired but not validated/fitting: " + firedTxt :
-         btcOnRaw ? "Nothing to do yet — watch" : "Stay out: BTC is risk-off on the daily"
-    table.cell(tb, 0, 0, "Coin Audit 27", text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 40))
-    table.cell(tb, 1, 0, regTxt, text_color = color.white, text_size = size.tiny, text_halign = text.align_left)
-    table.cell(tb, 0, 1, "What to do", text_color = color.white, text_size = size.tiny)
-    table.cell(tb, 1, 1, action, text_color = approvedNow ? color.lime : color.new(color.yellow, 0), text_size = size.small, text_halign = text.align_left)
-    table.cell(tb, 0, 2, "Plan", text_color = color.white, text_size = size.tiny)
-    table.cell(tb, 1, 2, "entry " + str.tostring(planLow, format.mintick) + "–" + str.tostring(close, format.mintick) + " · stop " + str.tostring(planStop, format.mintick)
-         + " · T1 " + str.tostring(planT1, format.mintick) + " · T2 " + str.tostring(planT2, format.mintick) + " · " + str.tostring(onCount) + " strategies on now",
-         text_color = color.white, text_size = size.tiny, text_halign = text.align_left)
-    table.cell(tb, 0, 3, "#", text_color = color.gray, text_size = size.tiny)
-    table.cell(tb, 1, 3, "strategy", text_color = color.gray, text_size = size.tiny, text_halign = text.align_left)
-    table.cell(tb, 2, 3, "regime", text_color = color.gray, text_size = size.tiny)
-    table.cell(tb, 3, 3, "now", text_color = color.gray, text_size = size.tiny)
+// ================================================================================================= DASHBOARD
+// Full: 9 columns × 34 rows. Compact: 5 columns × 16 rows. Hover any strategy name (how it works), chip (what it
+// measures), the verdict (score breakdown) or a status (the gate numbers).
+var table tb = table.new(POS, 9, 36, bgcolor = C_PANEL, frame_color = C_LINE, frame_width = 1, border_color = C_LINE, border_width = 1)
+if barstate.isfirst                                            // the layout is fixed by the inputs: merge once
+    if boardMode == "Full"
+        table.merge_cells(tb, 0, 0, 1, 0)
+        table.merge_cells(tb, 2, 0, 5, 0)
+        table.merge_cells(tb, 6, 0, 8, 0)
+        table.merge_cells(tb, 1, 1, 8, 1)
+        table.merge_cells(tb, 6, 2, 8, 2)
+        table.merge_cells(tb, 1, 3, 2, 3)
+        table.merge_cells(tb, 3, 3, 4, 3)
+        table.merge_cells(tb, 5, 3, 6, 3)
+        table.merge_cells(tb, 7, 3, 8, 3)
+        table.merge_cells(tb, 0, 33, 8, 33)
+    else if boardMode == "Compact"
+        table.merge_cells(tb, 0, 0, 2, 0)
+        table.merge_cells(tb, 3, 0, 4, 0)
+        table.merge_cells(tb, 1, 1, 4, 1)
+        table.merge_cells(tb, 1, 2, 4, 2)
+        table.merge_cells(tb, 1, 3, 4, 3)
+        table.merge_cells(tb, 0, 15, 4, 15)
+f_cell(int c, int r, string t, color tc, color bg, string tip, string ha) =>
+    table.cell(tb, c, r, t, text_color = tc, bgcolor = bg, text_size = TXT, text_halign = ha, tooltip = tip)
+f_wrap(string s, int w) =>                                     // table cells do not wrap: break long text into lines
+    string out = ""
+    string cur = ""
+    for wd in str.split(s, " ")
+        if cur != "" and str.length(cur) + str.length(wd) + 1 > w
+            out := out + (out == "" ? "" : "\n") + cur
+            cur := wd
+        else
+            cur := cur == "" ? wd : cur + " " + wd
+    out + (out == "" ? "" : "\n") + cur
+L_ = text.align_left
+C_ = text.align_center
+vCol = f_verdictCol(verdict)
+scoreTip = "Weighted checks (the bot's weights, ML excluded):\nLiquidity " + str.tostring(sLiq, "#") + " ×10 · Trend " + str.tostring(sTrend, "#") +
+     " ×13 · Momentum " + str.tostring(sMom, "#") + " ×6 · Volatility " + str.tostring(sVol, "#") + " ×5\nvs BTC " + str.tostring(sRs, "#") +
+     " ×9 · Flow " + str.tostring(sFlow, "#") + " ×6 · Market " + (cMAvail ? str.tostring(sMkt, "#") + " ×15" : "off") + " · Library " +
+     str.tostring(sLib, "#") + " ×28\nRaw " + str.tostring(scoreRaw, "#.#") + (capTxt == "" ? "" : " · caps: " + capTxt) +
+     "\n\nFAVORABLE ≥ 70 · WATCHLIST 55-70 · NEUTRAL 40-55 · AVOID < 40"
+trendCol = cTrendSt == "trend" and cDirUp ? colUp : cTrendSt == "range" ? colSetup : C_NEUT
+volCol   = cVolSt == "high" ? colDn : cVolSt == "low" ? colSetup : colUp
+btcCol   = cBtcRaw ? colUp : useBtc ? colDn : C_NEUT
+liqCol   = cLiqOk ? colUp : colDn
+stCol0   = cStruct == "bullish" ? colUp : cStruct == "bearish" ? colDn : C_NEUT
+mCol     = not cMAvail ? C_NEUT : f_scoreCol(isBtc ? cBtcS : cAlt)
+mktTxt   = cMAvail ? cMReg + " · " + (isBtc ? "BTC " : "alt ") + str.tostring(isBtc ? cBtcS : cAlt, "#") : "market layer off"
+footTxt  = "▲ BUY = validated + regime fits + nothing blocks · FIRED = new signal · on = condition holds · PASS = chart-backtest gates" +
+     (liveTxt != "" ? "\nforming candle (not confirmed yet): " + liveTxt : "")
+f_check(int c, string nm, float s, int w, string tip) =>
+    f_cell(c, 4, nm + " " + str.tostring(s, "#"), f_scoreCol(s), f_tint(f_scoreCol(s)), tip + "\nWeight " + str.tostring(w) + ". Pass ≥ 65, warn ≥ 40.", C_)
+
+if boardMode == "Full" and barstate.islast
+    f_cell(0, 0, "COIN AUDIT · 27", C_TXT, C_HEAD, "Coin Audit Bot — the 27-strategy library on your chart. Read-only research, not financial advice.", L_)
+    f_cell(2, 0, syminfo.ticker + " · " + timeframe.period + " · " + f_px(close), C_TXT, C_HEAD, "Symbol · timeframe · live price", C_)
+    f_cell(6, 0, verdict + "  " + str.tostring(score, "#") + "/100", color.white, vCol, scoreTip, C_)
+    f_cell(0, 1, "DO", C_MUTE, C_HEAD, "What to do now (live price against the plan of the last closed candle)", L_)
+    f_cell(1, 1, f_wrap(actTxt, 78), actCol, f_tint(actCol), actTxt, L_)
+    f_cell(0, 2, "MARKET", C_MUTE, C_HEAD, "Coin regime and the crypto-wide market", L_)
+    f_cell(1, 2, cTrendSt + (cDirUp ? " ↑" : " ↓"), trendCol, f_tint(trendCol), "Coin regime: trend if ADX ≥ 22 or efficiency ≥ 0.35, range if ADX < 18 and efficiency < 0.25, otherwise transition. Arrow = close above / under EMA50.", C_)
+    f_cell(2, 2, "vol " + cVolSt, volCol, f_tint(volCol), "ATR % against its trailing year: high ≥ 80th percentile, low ≤ 20th. High volatility switches off dip / momentum / pullback strategies.", C_)
+    f_cell(3, 2, "BTC " + (cBtcRaw ? "on" : "OFF") + (useBtc ? "" : " (filter off)"), btcCol, f_tint(btcCol), "BTC daily close above its long EMA and EMA20 > EMA50 = risk-on. Risk-off caps the verdict at WATCHLIST and switches off the strategies and regimes that need BTC." + (useBtc ? "" : "\nThe BTC filter is switched off in the inputs."), C_)
+    f_cell(4, 2, "liq " + (cLiqOk ? "ok" : "thin"), liqCol, f_tint(liqCol), "24h volume ≈ $" + str.tostring(cQv24 / 1e6, "#.#") + "M (floor $" + str.tostring(minQv24 / 1e6, "#.#") + "M).", C_)
+    f_cell(5, 2, cStruct, stCol0, f_tint(stCol0), "Market structure from the last two confirmed pivot highs and lows.", C_)
+    f_cell(6, 2, mktTxt, mCol, f_tint(mCol), cMBeh + "\n\nScore items met:\n" + cMItems, C_)
+    f_cell(0, 3, "PLAN", C_MUTE, C_HEAD, "The bot's reference trade plan for a spot long", L_)
+    f_cell(1, 3, "Entry " + f_px(planLow) + "–" + f_px(planHigh), colPlan, f_tint(colPlan), "From max(min(EMA20, close), close − 0.75 ATR), capped at close − 0.25 ATR, up to the close.", C_)
+    f_cell(3, 3, "Stop " + f_px(planStop) + " (" + f_pct(planStop / planRef - 1) + ")", colDn, f_tint(colDn), "Lower of: the 20-candle swing low − 0.25 ATR, and close − " + str.tostring(leadAtr) + " ATR (the leading strategy's stop); never more than 3 ATR under the zone.", C_)
+    f_cell(5, 3, "T1 " + f_px(planT1) + " · T2 " + f_px(planT2), colUp, f_tint(colUp), "T1 = 1.5R and T2 = 3R from the middle of the entry zone.", C_)
+    f_cell(7, 3, "Size " + str.tostring(planSizePct, "#.#") + "% ≈ $" + str.tostring(planUsd, "#,###"), C_TXT, C_ROWA, "Position for " + str.tostring(planRiskPct) + " % risk on a $" + str.tostring(accountUsd, "#,###") + " account (capped at 100 %)." + (planRiskPct < riskPct ? " Half risk: the leading approval is a 'partial' strategy." : ""), C_)
+    f_cell(0, 4, "CHECKS", C_MUTE, C_HEAD, "The bot's checks, 0-100", L_)
+    f_check(1, "Trend", sTrend, 13, "Daily 45 % · 4h 35 % · 1h 20 %: +25 close > EMA50, +25 EMA50 > EMA200, +20 EMA50 rising, +30 ADX ≥ 20 with +DI.")
+    f_check(2, "Mom", sMom, 6, "RSI in 50-68 best, MACD histogram positive and rising, 20-candle change.")
+    f_check(3, "Vol", sVol, 5, "Daily ATR %: 1.5-6 % ideal, > 10 % poor; −20 if it lost half its value within 90 days.")
+    f_check(4, "vs BTC", sRs, 9, "30- and 90-day return against BTC, +10 if BTC is risk-on, −15 if not.")
+    f_check(5, "Flow", sFlow, 6, "Price and volume over 7 days (the taker-buy part of the bot's check has no data on TradingView).")
+    f_check(6, "Liq", sLiq, 10, "24h volume band: $100M+ 100, $25M 85, $5M 65, $1M 40.")
+    f_cell(7, 4, cMAvail ? "Mkt " + str.tostring(sMkt, "#") : "Mkt off", cMAvail ? f_scoreCol(sMkt) : C_MUTE, cMAvail ? f_tint(f_scoreCol(sMkt)) : C_ROWA, "Altcoin (or BTC) eligibility score from the market layer. Weight 15.", C_)
+    f_check(8, "Library", sLib, 28, "35 + 22 per validated strategy firing in a fitting regime (max 2) + 10 per partial one (max 2) + 6 per validated (max 3) + 2 per partial (max 3); 25 if none.")
+    hdr = array.from("#", "Strategy", "Fit", "Now", "Trades", "Win", "PF", "Exp", "Status")
+    for c = 0 to 8
+        f_cell(c, 5, array.get(hdr, c), C_MUTE, C_HEAD, c == 2 ? "Regime fits what the strategy needs" : c == 3 ? "On the last closed candle" : c >= 4 and c <= 7 ? "Paper trades on this chart, after costs" : c == 8 ? "Chart-backtest gates" : "", c == 1 ? L_ : C_)
     for i = 0 to 26
+        r = 6 + i
         m = array.get(sMode, i)
-        fitT = f_fitTxt(array.get(sReq, i))
-        isOn = array.get(sOn, i)
-        isNew = array.get(sNew, i)
-        stTxt = m == "off" ? "off" : isNew ? "FIRED" : isOn ? "on" : "—"
-        stCol = m == "off" ? color.new(color.gray, 50) : isNew and m == "validated" and array.get(sFit, i) ? color.lime : isNew ? color.new(color.yellow, 0) : isOn ? color.new(color.aqua, 0) : color.new(color.gray, 20)
-        table.cell(tb, 0, 4 + i, str.tostring(i + 1), text_color = color.gray, text_size = size.tiny)
-        table.cell(tb, 1, 4 + i, array.get(sName, i) + (m == "validated" ? " ✓" : ""), text_color = m == "off" ? color.new(color.gray, 50) : color.white, text_size = size.tiny, text_halign = text.align_left)
-        table.cell(tb, 2, 4 + i, fitT, text_color = fitT == "fits" ? color.new(color.green, 0) : color.new(color.gray, 30), text_size = size.tiny)
-        table.cell(tb, 3, 4 + i, stTxt, text_color = stCol, text_size = size.tiny)
+        [n, wr, pf, ex, pf2, hn, hx, st] = f_stats(i)
+        fit = f_fit(i)
+        isOn = array.get(pOn, i)
+        isNew = array.get(pNew, i)
+        [val, appr, half, why] = f_appr(i, st, isOn)
+        isOff = m == "Off"
+        rowBg = isOff ? color(na) : appr ? f_tint(colAppr) : i % 2 == 0 ? C_ROWA : color(na)
+        nowTxt = isOff ? "off" : appr and isNew ? "▲ BUY" + (half ? " ½" : "") : appr ? "APPROVED" + (half ? " ½" : "") : isNew ? "FIRED" : isOn ? "on" : "—"
+        nowCol = isOff ? C_MUTE : appr ? colAppr : isNew ? colSetup : isOn ? colPlan : C_MUTE
+        stC = st == "PASS" ? colUp : st == "partial" ? colSetup : st == "fail" ? colDn : C_MUTE
+        nameTip = array.get(sHow, i) + "\n\nFamily: " + array.get(sFam, i) + " · needs regime: " + array.get(sReq, i) +
+             (val ? "\nVALIDATED" + (m == "Validated ✓" ? " (your ✓)" : " (chart gates)") : "") +
+             (isOn and not appr ? "\nNot approved: " + (not val and not half ? "not validated" : not fit ? "regime does not fit" : why) : "")
+        gateTip = "Paper trades on this chart: " + str.tostring(n) + " (gate ≥ " + str.tostring(gMinTr) + ")\nProfit factor " + str.tostring(pf, "#.##") +
+             " (gate ≥ " + str.tostring(gMinPf) + ")\nPF at 2× costs " + str.tostring(pf2, "#.##") + " (gate > 1)\nExpectancy " + f_pct(ex) +
+             " per trade (gate > 0)\nHoldout, last " + str.tostring(gHoldPct) + " %: " + str.tostring(hn) + " trades, " + (na(hx) ? "—" : f_pct(hx)) + " per trade" +
+             (gNeedHold ? " (gate ≥ 3 trades and > 0)" : " (not required)")
+        f_cell(0, r, str.tostring(i + 1, "00"), C_MUTE, rowBg, "", C_)
+        f_cell(1, r, array.get(sName, i) + (m == "Validated ✓" ? " ✓" : ""), isOff ? C_MUTE : C_TXT, rowBg, nameTip, L_)
+        f_cell(2, r, isOff ? "" : fit ? "✓" : "✗", fit ? colUp : C_MUTE, rowBg, "Needs regime: " + array.get(sReq, i), C_)
+        f_cell(3, r, nowTxt, nowCol, rowBg, isOn and not appr and not isOff ? "Not approved: " + (not val and not half ? "not validated" : not fit ? "regime does not fit" : why) :
+             half and appr ? "Approved at half risk: 'partial' on the chart test." : "", C_)
+        f_cell(4, r, n > 0 ? str.tostring(n) : "—", C_TXT, rowBg, "", C_)
+        f_cell(5, r, n > 0 ? str.tostring(wr * 100, "#") + "%" : "—", C_TXT, rowBg, "", C_)
+        f_cell(6, r, n > 0 ? str.tostring(pf, "#.##") : "—", n == 0 ? C_MUTE : pf >= gMinPf ? colUp : pf >= 1 ? colSetup : colDn, rowBg, "", C_)
+        f_cell(7, r, n > 0 ? f_pct(ex) : "—", n == 0 ? C_MUTE : ex > 0 ? colUp : colDn, rowBg, "", C_)
+        f_cell(8, r, st == "PASS" ? "PASS ✓" : st, stC, rowBg, gateTip, C_)
+    f_cell(0, 33, f_wrap(footTxt, 110), C_MUTE, C_HEAD, "Chart backtest = the bot's exit mechanics on the loaded history with fixed default parameters. It is a reduced version of the bot's 12 walk-forward gates — run the bot for the full validation.", L_)
 
-// ------------------------------------------------------------------------------------------------- alerts
-if barstate.isconfirmed and anyNew
-    alert(syminfo.ticker + " " + timeframe.period + " · fired: " + firedTxt + (approvedNow ? " · APPROVED: " + apprTxt : "")
-         + " · regime " + trendSt + "/" + volSt + " BTC " + (btcOnRaw ? "on" : "OFF")
-         + " · plan entry " + str.tostring(planLow, format.mintick) + "-" + str.tostring(close, format.mintick)
-         + " stop " + str.tostring(planStop, format.mintick) + " T1 " + str.tostring(planT1, format.mintick)
-         + (na(sigStop) ? "" : " · strategy stop " + str.tostring(sigStop, format.mintick)), alert.freq_once_per_bar_close)
-alertcondition(approvedNow, "Approved buy signal", "Coin Audit: a validated strategy fired in a fitting regime on {{ticker}} {{interval}}")
-alertcondition(anyNew, "Any strategy fired", "Coin Audit: a strategy fired on {{ticker}} {{interval}} — open the board")
-alertcondition(useBtc and not btcOnRaw and btcOnRaw[1], "BTC turned risk-off", "Coin Audit: BTC closed below its long daily average — altcoin longs are capped")
-alertcondition(not na(setupLvl) and na(setupLvl[1]), "Breakout setup armed", "Coin Audit: a chart pattern armed on {{ticker}} {{interval}} — wait for the close above the level")
+if boardMode == "Compact" and barstate.islast
+    f_cell(0, 0, syminfo.ticker + " · " + timeframe.period, C_TXT, C_HEAD, "Coin Audit · 27 strategies", L_)
+    f_cell(3, 0, verdict + " " + str.tostring(score, "#"), color.white, vCol, scoreTip, C_)
+    f_cell(0, 1, "DO", C_MUTE, C_HEAD, "", L_)
+    f_cell(1, 1, f_wrap(actTxt, 46), actCol, f_tint(actCol), actTxt, L_)
+    f_cell(0, 2, "PLAN", C_MUTE, C_HEAD, "", L_)
+    f_cell(1, 2, f_px(planLow) + "–" + f_px(planHigh) + " · stop " + f_px(planStop) + " · T1 " + f_px(planT1), colPlan, f_tint(colPlan),
+         "Entry zone · stop · T1 (1.5R) · T2 " + f_px(planT2) + " (3R) · size " + str.tostring(planSizePct, "#.#") + " %", L_)
+    f_cell(0, 3, "MKT", C_MUTE, C_HEAD, "", L_)
+    f_cell(1, 3, cTrendSt + (cDirUp ? " ↑" : " ↓") + " · vol " + cVolSt + " · BTC " + (cBtcRaw ? "on" : "OFF") + " · " + mktTxt, mCol, f_tint(mCol), cMBeh + "\n\n" + cMItems, L_)
+    hdrC = array.from("#", "Strategy", "Now", "PF", "Status")
+    for c = 0 to 4
+        f_cell(c, 4, array.get(hdrC, c), C_MUTE, C_HEAD, "", c == 1 ? L_ : C_)
+    int[] pick = array.new<int>()
+    for pass = 0 to 3                                          // approved → fired → on → validated
+        for i = 0 to 26
+            if array.size(pick) < 10 and array.get(sMode, i) != "Off" and not array.includes(pick, i)
+                [n, wr, pf, ex, pf2, hn, hx, st] = f_stats(i)
+                [val, appr, half, why] = f_appr(i, st, array.get(pOn, i))
+                take = pass == 0 ? appr : pass == 1 ? array.get(pNew, i) : pass == 2 ? array.get(pOn, i) : val
+                if take
+                    array.push(pick, i)
+    for k = 0 to 9
+        r = 5 + k
+        if k < array.size(pick)
+            i = array.get(pick, k)
+            [n, wr, pf, ex, pf2, hn, hx, st] = f_stats(i)
+            isOn = array.get(pOn, i)
+            isNew = array.get(pNew, i)
+            [val, appr, half, why] = f_appr(i, st, isOn)
+            f_cell(0, r, str.tostring(i + 1, "00"), C_MUTE, color(na), "", C_)
+            f_cell(1, r, array.get(sName, i), C_TXT, appr ? f_tint(colAppr) : color(na), array.get(sHow, i), L_)
+            f_cell(2, r, appr and isNew ? "▲ BUY" + (half ? " ½" : "") : appr ? "APPROVED" + (half ? " ½" : "") : isNew ? "FIRED" : isOn ? "on" : "—",
+                 appr ? colAppr : isNew ? colSetup : isOn ? colPlan : C_MUTE, color(na), isOn and not appr ? "Not approved: " + (not val and not half ? "not validated" : why == "" ? "regime does not fit" : why) : "", C_)
+            f_cell(3, r, n > 0 ? str.tostring(pf, "#.##") : "—", n == 0 ? C_MUTE : pf >= gMinPf ? colUp : colDn, color(na), "", C_)
+            f_cell(4, r, st == "PASS" ? "PASS ✓" : st, st == "PASS" ? colUp : st == "partial" ? colSetup : C_MUTE, color(na), str.tostring(n) + " paper trades, " + f_pct(ex) + " per trade", C_)
+        else
+            for c = 0 to 4
+                f_cell(c, r, "", C_MUTE, color(na), "", C_)
+    f_cell(0, 15, array.size(pick) == 0 ? "No strategy is active or validated on this chart." : "Full dashboard: inputs → Dashboard → Full", C_MUTE, C_HEAD, "", L_)
+
+// ==================================================================================================== ALERTS
+alertcondition(barstate.isconfirmed and nAppNew > 0, "Approved buy signal", "Coin Audit: APPROVED long signal on {{ticker}} {{interval}} — open the dashboard for the plan.")
+alertcondition(barstate.isconfirmed and nFired > 0, "Any strategy fired", "Coin Audit: a strategy fired on {{ticker}} {{interval}}.")
+alertcondition(barstate.isconfirmed and not na(setupLvl) and na(setupLvl[1]), "Breakout setup armed", "Coin Audit: a chart pattern armed on {{ticker}} {{interval}} — wait for a close above the yellow level.")
+alertcondition(barstate.isconfirmed and bearEvent, "Bearish pattern completed", "Coin Audit: bearish pattern on {{ticker}} {{interval}} — new longs blocked for 3 candles.")
+alertcondition(barstate.isconfirmed and not btcOnRaw and btcOnRaw[1], "BTC turned risk-off", "Coin Audit: BTC closed under its long daily EMA — altcoin longs are capped.")
+alertcondition(barstate.isconfirmed and verdict == "FAVORABLE" and verdict[1] != "FAVORABLE", "Verdict became FAVORABLE", "Coin Audit: {{ticker}} {{interval}} turned FAVORABLE.")
+if barstate.isconfirmed and nFired > 0
+    alert(syminfo.ticker + " " + timeframe.period + " · " + (nAppNew > 0 ? "APPROVED: " + apprTxt + " · " : "") + "fired: " + firedTxt + " · " + verdict + " " +
+         str.tostring(score, "#") + "/100 · " + actTxt, alert.freq_once_per_bar_close)

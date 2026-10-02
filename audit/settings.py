@@ -9,7 +9,7 @@ import os
 import tomllib
 from pathlib import Path
 
-__version__ = "7.1.0"
+__version__ = "7.2.0"
 
 DEFAULTS: dict = {
     "costs": {"fee": 0.001, "slippage": 0.0005, "maker_fee": 0.001, "futures_taker": 0.0005},

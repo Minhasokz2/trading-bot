@@ -1,5 +1,41 @@
 # Changelog
 
+## v7.2 — 2026-10-02 — TradingView indicator v2 and the master prompt
+
+- **`tradingview/INDICATOR_PROMPT.md`** — a self-contained specification of everything the indicator does, written as a
+  prompt you can give to an AI or a Pine developer: the hard Pine v6 rules (no repainting, higher timeframes, lazy
+  `and` / `or`, limits), the core series, the multi-timeframe context, the coin regime, the market layer (every
+  fact, the altcoin and BTC scores item by item, the 8 regimes and the gate), the pivot engine and breakout trigger,
+  **each of the 27 strategies in full** (entry, exit, stop, target, time limit, trailing, ROI, limit orders, regime,
+  the parameter values the bot tests), the bearish blockers, the chart backtest and its gates, the approval chain,
+  every check's formula, the score, caps and verdict, the trade plan, the what-to-do logic, the complete UI (inputs,
+  chart elements, the Full and Compact dashboards cell by cell, theme tokens, alerts), the script layout, acceptance
+  tests, the known differences from the bot and what an AI must return.
+- **Indicator v2** (`tradingview/coin_audit_library.pine`), a proper UI and much closer to the bot:
+  - dashboard with the verdict and score (hover: the weighted breakdown and caps), *what to do now* against the live
+    price, the coin and market regime chips, the plan, the eight checks, and one row per strategy with its regime fit,
+    state, and its paper-trading record on the chart (trades, win %, profit factor, expectancy, status — hover for
+    every gate); Full and Compact layouts, auto light / dark theme, 8 positions, 3 text sizes, data-window values;
+  - every strategy paper-traded on the loaded history with the bot's exits (stop → target → ROI → exit signal / time
+    limit / early-loss cut, trailing stops, limit orders that a new signal replaces, 2-candle cooldown and the
+    3-stops-in-48 StoplossGuard, costs on both sides) and gated: expectancy > 0, profit factor ≥ 1.2, profitable at 2×
+    costs, ≥ 3 profitable-on-average holdout trades in the last 15 %, ≥ 20 trades;
+  - approval like the bot: validated (chart gates, your ✓ list, or either; optionally *partial* strategies at half
+    risk like CANDIDATEs) → regime fits → not blocked by liquidity, a fresh bearish pattern or the market gate;
+  - the market layer (TOTAL / TOTAL2 / TOTAL3, BTC.D, USDT.D, ETH/BTC, coin/BTC, DXY, VIX, NDX → the 8 regimes and the
+    eligibility scores, 15 % of the verdict) and the bot's checks, weights, caps and verdict;
+  - strategy 19 now uses the bot's least-squares parabola (R² ≥ 0.7, vertex in the middle) with separate rounding-bottom
+    and cup & handle setups; the rounding top joins the bearish blockers; the downtrend line re-arms on every new
+    pivot low; pivots need a unique 7-candle extreme like `patterns.pivots`; parameter defaults all come from the
+    bot's grids, listed in every tooltip; the BTC filter switch applies everywhere; *under the zone* state.
+  - Pine v6 lazy evaluation: every stateful call (a rolling sum, `ta.sma`, `ta.highest`) moved out of `and` / `or`
+    chains — one of them silently miscounted in the BTC-recovery test of the market layer.
+- **`tradingview/lint_pine.py`** — offline checks (there is no Pine compiler outside TradingView): grammar parse with
+  pynescript, built-in functions / constants / named arguments against the v6 reference, wrapped-line indentation,
+  typed `na`, duplicate declarations, `:=` before declaration, and the v6 lazy-evaluation rule (stateful calls after
+  `and` / `or` / `?:` or inside local blocks). `--fast` skips the slow grammar parse. Tested in
+  `tests/test_tradingview.py`.
+
 ## v7.1 — 2026-10-02 — TradingView indicator
 
 - `tradingview/coin_audit_library.pine` (Pine Script v6): the whole strategy library as one chart indicator —
